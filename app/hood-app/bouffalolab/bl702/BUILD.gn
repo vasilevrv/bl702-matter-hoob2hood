@@ -1,0 +1,172 @@
+# Copyright (c) 2026 Project CHIP Authors
+# Licensed under the Apache License, Version 2.0 (the "License");
+
+import("//build_overrides/bouffalolab_iot_sdk.gni")
+import("//build_overrides/build.gni")
+import("//build_overrides/chip.gni")
+
+import("${bouffalolab_iot_sdk_build_root}/bl702/bl_iot_sdk.gni")
+import("${bouffalolab_iot_sdk_build_root}/common/bouffalolab_executable.gni")
+import("${build_root}/config/defaults.gni")
+import("${chip_root}/src/app/chip_data_model.gni")
+import("${chip_root}/src/platform/bouffalolab/common/args.gni")
+import("${chip_root}/src/platform/device.gni")
+
+assert(current_os == "freertos")
+
+example_dir = "${chip_root}/examples/hood-app/bouffalolab"
+data_model_dir = "${chip_root}/examples/hood-app/hood-common"
+examples_plat_dir = "${chip_root}/examples/platform/bouffalolab"
+
+declare_args() {
+  chip_print_memory_usage = true
+  enable_heap_monitoring = false
+
+  setupPinCode = 20202021
+  setupDiscriminator = 3840
+
+  board = "BL706DK"
+  module_type = "BL706C-22"
+  baudrate = 115200
+  enable_cdc_module = false
+
+  # XT-ZB2 has no external PSRAM.
+  enable_psram = false
+}
+
+bl_iot_sdk("sdk") {
+  include_dirs = [
+    "${example_dir}/bl702",
+    "${examples_plat_dir}",
+    "${examples_plat_dir}/common/iot_sdk",
+    "${examples_plat_dir}/common/route_hook",
+    "${chip_root}/src/platform/bouffalolab/BL702",
+    "${chip_root}/src/platform/bouffalolab/common",
+  ]
+
+  freertos_config = "${example_dir}/bl702/FreeRTOSConfig.h"
+
+  defines = [
+    "INCLUDE_xSemaphoreGetMutexHolder=1",
+    "CHIP_DEVICE_CONFIG_USE_TEST_SETUP_PIN_CODE=${setupPinCode}",
+    "CHIP_DEVICE_CONFIG_USE_TEST_SETUP_DISCRIMINATOR=${setupDiscriminator}",
+    "IEEE802_15_4_RADIO_RECEIVE_SENSITIVITY=-105",
+    "OPENTHREAD_FTD=0",
+    "OPENTHREAD_MTD=1",
+    "OTA_AUTO_REBOOT_DELAY=5",
+    "PRINT_DEBUG=0",
+    "PW_RPC_ENABLED=0",
+    "CHIP_DEVICE_CONFIG_ENABLE_ETHERNET=${chip_enable_ethernet}",
+  ]
+}
+
+chip_data_model("bouffalolab-hood") {
+  zap_file = "${data_model_dir}/hood-app.zap"
+  is_server = true
+}
+
+bouffalolab_executable("hood_app") {
+  output_name = "chip-bl702-hood-example.out"
+  bl_plat_name = "bl702"
+
+  defines = [
+    "APP_TASK_STACK_SIZE=2048",
+    "CHIP_UART_BAUDRATE=${baudrate}",
+    "START_ENTRY=bl702_main",
+    "BOUFFALOLAB_APP_NAME=\"chip-hood-example\"",
+    "CONFIG_BOUFFALOLAB_FACTORY_DATA_ENABLE=${chip_enable_factory_data}",
+    "CONFIG_ENABLE_CHIP_SHELL=0",
+    "PW_RPC_ENABLED=0",
+    "HEAP_MONITORING=${enable_heap_monitoring}",
+  ]
+
+  if (chip_config_network_layer_ble) {
+    defines += [ "CHIP_DEVICE_CONFIG_ENABLE_CHIPOBLE=1" ]
+  }
+
+  sources = [
+    "${example_dir}/common/AppTask.cpp",
+    "${example_dir}/common/HoodController.cpp",
+    "${example_dir}/common/HoodUart.c",
+    "${example_dir}/common/ZclCallbacks.cpp",
+    "${examples_plat_dir}/common/iot_sdk/aos_task.c",
+    "${examples_plat_dir}/common/iot_sdk/platform_port.cpp",
+    "${examples_plat_dir}/common/iot_sdk/uart.cpp",
+    "${examples_plat_dir}/common/plat/main.cpp",
+    "${examples_plat_dir}/common/plat/platform.cpp",
+  ]
+
+  deps = [
+    ":bouffalolab-hood",
+    ":sdk",
+    "${chip_root}/examples/providers:device_info_provider_please_do_not_reuse_as_is",
+    "${chip_root}/src/app/clusters/network-commissioning:network-commissioning",
+    "${chip_root}/src/lib",
+    "${chip_root}/src/platform/logging:default",
+    "${chip_root}/src/setup_payload",
+  ]
+
+  include_dirs = [
+    "${chip_root}/src/platform/bouffalolab/BL702",
+    "${example_dir}/common",
+    "${example_dir}/bl702",
+    "${examples_plat_dir}/common/plat",
+    "${examples_plat_dir}/common/iot_sdk",
+  ]
+
+  if (chip_enable_openthread) {
+    deps += [
+      "${chip_root}/third_party/openthread/platforms:libopenthread-platform",
+      "${chip_root}/third_party/openthread/platforms:libopenthread-platform-utils",
+    ]
+
+    if (chip_openthread_ftd) {
+      defines += [ "CHIP_DEVICE_CONFIG_THREAD_FTD=1" ]
+      deps += [
+        "${openthread_root}:libopenthread-cli-ftd",
+        "${openthread_root}:libopenthread-ftd",
+      ]
+    } else {
+      defines += [ "CHIP_DEVICE_CONFIG_THREAD_FTD=0" ]
+      deps += [
+        "${openthread_root}:libopenthread-cli-mtd",
+        "${openthread_root}:libopenthread-mtd",
+      ]
+    }
+  }
+
+  if (enable_heap_monitoring) {
+    sources += [ "${examples_plat_dir}/common/plat/MemMonitoring.cpp" ]
+  }
+
+  ldscript = "${example_dir}/bl702/flash.ld"
+  inputs = [ ldscript ]
+  ldflags = [
+    "-T" + rebase_path(ldscript, root_build_dir),
+    "-Wl,--defsym=__CACHE_SIZE=4K",
+  ]
+  cflags_c = [
+    "-Wno-unused-variable",
+    "-Wno-old-style-declaration",
+  ]
+  cflags = [
+    "-Wno-unused-variable",
+    "-Wno-array-bounds",
+    "-Wno-stringop-overflow",
+  ]
+  if (chip_print_memory_usage) {
+    ldflags += [
+      "-Wl,--print-memory-usage",
+      "-fstack-usage",
+    ]
+  }
+  output_dir = root_out_dir
+}
+
+group("bl702") {
+  deps = [ ":hood_app" ]
+}
+
+group("default") {
+  deps = [ ":bl702" ]
+}

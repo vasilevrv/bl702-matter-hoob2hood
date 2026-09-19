@@ -1,0 +1,161 @@
+diff --git a/examples/platform/bouffalolab/common/plat/platform.cpp b/examples/platform/bouffalolab/common/plat/platform.cpp
+index a5052f72..b7d6f1a5 100644
+--- a/examples/platform/bouffalolab/common/plat/platform.cpp
++++ b/examples/platform/bouffalolab/common/plat/platform.cpp
+@@ -16,7 +16,12 @@
+  *    limitations under the License.
+  */
+ #include <DeviceInfoProviderImpl.h>
++#ifndef CHIP_DEVICE_CONFIG_ENABLE_OTA_REQUESTOR
++#define CHIP_DEVICE_CONFIG_ENABLE_OTA_REQUESTOR 1
++#endif
++#if CHIP_DEVICE_CONFIG_ENABLE_OTA_REQUESTOR
+ #include <OTAConfig.h>
++#endif
+ #include <app/server/Dnssd.h>
+ #include <app/server/Server.h>
+ #include <credentials/DeviceAttestationCredsProvider.h>
+@@ -117,8 +122,10 @@ void ChipEventHandler(const ChipDeviceEvent * event, intptr_t arg)
+ 
+         if (ConnectivityMgr().IsThreadAttached())
+         {
++#if CHIP_DEVICE_CONFIG_ENABLE_OTA_REQUESTOR
+             chip::DeviceLayer::SystemLayer().StartTimer(chip::System::Clock::Seconds32(OTAConfig::kInitOTARequestorDelaySec),
+                                                         OTAConfig::InitOTARequestorHandler, nullptr);
++#endif
+         }
+         break;
+ #endif
+@@ -137,8 +144,10 @@ void ChipEventHandler(const ChipDeviceEvent * event, intptr_t arg)
+ 
+             bflb_route_hook_init();
+ 
++#if CHIP_DEVICE_CONFIG_ENABLE_OTA_REQUESTOR
+             chip::DeviceLayer::SystemLayer().StartTimer(chip::System::Clock::Seconds32(OTAConfig::kInitOTARequestorDelaySec),
+                                                         OTAConfig::InitOTARequestorHandler, nullptr);
++#endif
+         }
+         break;
+ #endif
+diff --git a/src/app/clusters/network-commissioning/ThreadScanResponse.cpp b/src/app/clusters/network-commissioning/ThreadScanResponse.cpp
+index 8890e4a4..bf8076a6 100644
+--- a/src/app/clusters/network-commissioning/ThreadScanResponse.cpp
++++ b/src/app/clusters/network-commissioning/ThreadScanResponse.cpp
+@@ -21,6 +21,8 @@
+ #include <clusters/NetworkCommissioning/Structs.h>
+ #include <lib/support/SortUtils.h>
+ 
++#include <array>
++
+ using chip::DeviceLayer::NetworkCommissioning::ThreadScanResponse;
+ 
+ namespace chip {
+@@ -36,12 +38,9 @@ namespace {
+ /// Returns the valid list of scan responses into `validResponses`, which is only valid
+ /// as long as scanResponseArray is valid.
+ CHIP_ERROR LoadResponses(DeviceLayer::NetworkCommissioning::ThreadScanResponseIterator * networks,
+-                         Platform::ScopedMemoryBuffer<ThreadScanResponse> & scanResponseArray,
++                         std::array<ThreadScanResponse, kMaxNetworksInScanResponse> & scanResponseArray,
+                          Span<ThreadScanResponse> & validResponses)
+ {
+-    VerifyOrReturnError(scanResponseArray.Alloc(std::min(networks == nullptr ? 0 : networks->Count(), kMaxNetworksInScanResponse)),
+-                        CHIP_ERROR_NO_MEMORY);
+-
+     ThreadScanResponse scanResponse;
+     size_t scanResponseArrayLength = 0;
+     for (; networks != nullptr && networks->Next(scanResponse);)
+@@ -84,11 +83,11 @@ CHIP_ERROR LoadResponses(DeviceLayer::NetworkCommissioning::ThreadScanResponseIt
+ 
+         // TODO: this is a sort (insertion sort even, so O(n^2)) in a O(n) loop.
+         ///      There should be some better alternatives to not have some O(n^3) processing complexity.
+-        Sorting::InsertionSort(scanResponseArray.Get(), scanResponseArrayLength,
++        Sorting::InsertionSort(scanResponseArray.data(), scanResponseArrayLength,
+                                [](const ThreadScanResponse & a, const ThreadScanResponse & b) -> bool { return a.rssi > b.rssi; });
+     }
+ 
+-    validResponses = Span<ThreadScanResponse>(scanResponseArray.Get(), scanResponseArrayLength);
++    validResponses = Span<ThreadScanResponse>(scanResponseArray.data(), scanResponseArrayLength);
+ 
+     return CHIP_NO_ERROR;
+ }
+@@ -96,7 +95,11 @@ CHIP_ERROR LoadResponses(DeviceLayer::NetworkCommissioning::ThreadScanResponseIt
+ 
+ CHIP_ERROR ThreadScanResponseToTLV::EncodeTo(TLV::TLVWriter & writer, TLV::Tag tag) const
+ {
+-    Platform::ScopedMemoryBuffer<ThreadScanResponse> responseArray;
++    // Keep the temporary de-duplicated result set on the CHIP task stack.
++    // The OpenThread iterator already owns a heap-backed copy of scan results;
++    // allocating a second copy here can exhaust constrained devices exactly
++    // while the commissioner is waiting for ScanNetworksResponse.
++    std::array<ThreadScanResponse, kMaxNetworksInScanResponse> responseArray;
+     Span<ThreadScanResponse> responseSpan;
+ 
+     ReturnErrorOnFailure(LoadResponses(mNetworks, responseArray, responseSpan));
+diff --git a/src/platform/bouffalolab/common/BflbConfig_littlefs.cpp b/src/platform/bouffalolab/common/BflbConfig_littlefs.cpp
+index dec1c06f..e5166586 100644
+--- a/src/platform/bouffalolab/common/BflbConfig_littlefs.cpp
++++ b/src/platform/bouffalolab/common/BflbConfig_littlefs.cpp
+@@ -194,6 +194,7 @@ CHIP_ERROR BflbConfig::ReadConfigValue(const char * key, uint8_t * val, size_t s
+     CHIP_ERROR err = CHIP_NO_ERROR;
+     int ret        = LFS_ERR_OK;
+     lfs_file_t file;
++    bool fileOpen  = false;
+     char * read_key = blcfg_convert_key(key, BflbConfig_LFS_NAMESPACE);
+ 
+     VerifyOrExit(read_key != nullptr, err = CHIP_ERROR_NO_MEMORY);
+@@ -202,15 +203,23 @@ CHIP_ERROR BflbConfig::ReadConfigValue(const char * key, uint8_t * val, size_t s
+ 
+     ret = lfs_file_open(BflbConfig_lfs, &file, read_key, LFS_O_RDONLY);
+     VerifyOrExit(ret == LFS_ERR_OK, err = CHIP_DEVICE_ERROR_CONFIG_NOT_FOUND);
++    fileOpen = true;
+ 
+     if (val && size)
+     {
+         ret      = lfs_file_read(BflbConfig_lfs, &file, val, size);
+-        readsize = ret;
++        VerifyOrExit(ret >= LFS_ERR_OK, err = CHIP_ERROR_PERSISTED_STORAGE_FAILED);
++        readsize = static_cast<size_t>(ret);
+     }
+-    lfs_file_close(BflbConfig_lfs, &file);
++    ret = lfs_file_close(BflbConfig_lfs, &file);
++    fileOpen = false;
++    VerifyOrExit(ret == LFS_ERR_OK, err = CHIP_ERROR_PERSISTED_STORAGE_FAILED);
+ 
+ exit:
++    if (fileOpen)
++    {
++        lfs_file_close(BflbConfig_lfs, &file);
++    }
+     BflbConfig_lfs->cfg->unlock(BflbConfig_lfs->cfg);
+     if (read_key)
+     {
+@@ -279,10 +288,26 @@ CHIP_ERROR BflbConfig::WriteConfigValue(const char * key, uint8_t * val, size_t
+     BflbConfig_lfs->cfg->lock(BflbConfig_lfs->cfg);
+ 
+     ret = lfs_file_open(BflbConfig_lfs, &file, write_key, LFS_O_CREAT | LFS_O_RDWR | LFS_O_TRUNC);
+-    VerifyOrExit(ret == LFS_ERR_OK, err = CHIP_ERROR_PERSISTED_STORAGE_FAILED);
++    if (ret != LFS_ERR_OK)
++    {
++        ChipLogError(DeviceLayer, "LittleFS open '%s' failed: %d", write_key, ret);
++        err = CHIP_ERROR_PERSISTED_STORAGE_FAILED;
++        goto exit;
++    }
+ 
+-    lfs_file_write(BflbConfig_lfs, &file, val, size);
+-    lfs_file_close(BflbConfig_lfs, &file);
++    ret = lfs_file_write(BflbConfig_lfs, &file, val, size);
++    if (ret != static_cast<int>(size))
++    {
++        ChipLogError(DeviceLayer, "LittleFS write '%s' failed: %d", write_key, ret);
++        err = CHIP_ERROR_PERSISTED_STORAGE_FAILED;
++    }
++
++    ret = lfs_file_close(BflbConfig_lfs, &file);
++    if (ret != LFS_ERR_OK)
++    {
++        ChipLogError(DeviceLayer, "LittleFS close '%s' failed: %d", write_key, ret);
++        err = CHIP_ERROR_PERSISTED_STORAGE_FAILED;
++    }
+ 
+ exit:
+     BflbConfig_lfs->cfg->unlock(BflbConfig_lfs->cfg);

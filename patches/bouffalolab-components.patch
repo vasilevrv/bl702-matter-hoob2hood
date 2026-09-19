@@ -1,0 +1,134 @@
+diff --git a/network/thread/openthread_port/ot_sys_iot.c b/network/thread/openthread_port/ot_sys_iot.c
+index f390f5d..9f1a8c6 100644
+--- a/network/thread/openthread_port/ot_sys_iot.c
++++ b/network/thread/openthread_port/ot_sys_iot.c
+@@ -49,7 +49,7 @@ void otPlatFree(void *aPtr)
+ 
+ void otPlatReset(otInstance *aInstance) 
+ {
+-#if CFG_USE_PSRAM
++#if defined(CFG_USE_PSRAM) && CFG_USE_PSRAM
+ 
+ extern uint8_t _heap_size; // @suppress("Type cannot be resolved")
+ extern uint8_t _heap2_size; // @suppress("Type cannot be resolved")
+@@ -121,4 +121,4 @@ otError otPlatEntropyGet(uint8_t *aOutput, uint16_t aOutputLength)
+ {
+     bl_rand_stream(aOutput, aOutputLength);
+     return OT_ERROR_NONE;
+-}
+\ No newline at end of file
++}
+diff --git a/platform/hosal/bl702_hal/bl_flash.c b/platform/hosal/bl702_hal/bl_flash.c
+index 07b6594..d4ac6af 100644
+--- a/platform/hosal/bl702_hal/bl_flash.c
++++ b/platform/hosal/bl702_hal/bl_flash.c
+@@ -63,6 +63,8 @@ static uint32_t fw_start_addr = 0;
+ static uint32_t fw_end_addr = 0;
+ static uint32_t pt_start_addr = 0;
+ static uint32_t pt_end_addr = 0;
++static uint32_t allowed_start_addr = 0;
++static uint32_t allowed_end_addr = 0;
+ 
+ static uint32_t flash_size = 0;
+ 
+@@ -85,11 +87,12 @@ int bl_flash_erase(uint32_t addr, int len)
+     if(fw_protect_en){
+         uint32_t start_addr = addr & 0xFFFFF000;
+         uint32_t end_addr = (addr + len + 0xFFF) & 0xFFFFF000;
+-        if(!(start_addr >= fw_end_addr || end_addr <= fw_start_addr)){
++        uint8_t allowed = start_addr >= allowed_start_addr && end_addr <= allowed_end_addr;
++        if(!allowed && !(start_addr >= fw_end_addr || end_addr <= fw_start_addr)){
+             blog_error("[FLASH] Attempt to erase fw region, start_addr 0x%08lx, end_addr 0x%08lx\r\n", start_addr, end_addr);
+             return -1;
+         }
+-        if(!(start_addr >= pt_end_addr || end_addr <= pt_start_addr)){
++        if(!allowed && !(start_addr >= pt_end_addr || end_addr <= pt_start_addr)){
+             blog_error("[FLASH] Attempt to erase pt region, start_addr 0x%08lx, end_addr 0x%08lx\r\n", start_addr, end_addr);
+             return -1;
+         }
+@@ -119,11 +122,12 @@ int bl_flash_write(uint32_t addr, uint8_t *src, int len)
+     if(fw_protect_en){
+         uint32_t start_addr = addr;
+         uint32_t end_addr = addr + len;
+-        if(!(start_addr >= fw_end_addr || end_addr <= fw_start_addr)){
++        uint8_t allowed = start_addr >= allowed_start_addr && end_addr <= allowed_end_addr;
++        if(!allowed && !(start_addr >= fw_end_addr || end_addr <= fw_start_addr)){
+             blog_error("[FLASH] Attempt to write fw region, start_addr 0x%08lx, end_addr 0x%08lx\r\n", start_addr, end_addr);
+             return -1;
+         }
+-        if(!(start_addr >= pt_end_addr || end_addr <= pt_start_addr)){
++        if(!allowed && !(start_addr >= pt_end_addr || end_addr <= pt_start_addr)){
+             blog_error("[FLASH] Attempt to write pt region, start_addr 0x%08lx, end_addr 0x%08lx\r\n", start_addr, end_addr);
+             return -1;
+         }
+@@ -376,6 +380,12 @@ int bl_flash_fw_protect_set(uint8_t en, uint32_t fw_addr, uint32_t fw_size, uint
+     return 0;
+ }
+ 
++void bl_flash_fw_protect_allow_region(uint32_t addr, uint32_t size)
++{
++    allowed_start_addr = addr;
++    allowed_end_addr = addr + size;
++}
++
+ uint32_t bl_flash_get_size(void)
+ {
+     return flash_size;
+diff --git a/platform/hosal/bl702_hal/bl_flash.h b/platform/hosal/bl702_hal/bl_flash.h
+index adbac89..8366323 100644
+--- a/platform/hosal/bl702_hal/bl_flash.h
++++ b/platform/hosal/bl702_hal/bl_flash.h
+@@ -39,6 +39,7 @@ int bl_flash_write_need_lock(uint32_t addr, uint8_t *src, int len);
+ int bl_flash_read_need_lock(uint32_t addr, uint8_t *dst, int len);
+ int bl_flash_config_update(void);
+ int bl_flash_fw_protect_set(uint8_t en, uint32_t fw_addr, uint32_t fw_size, uint32_t pt_addr, uint32_t pt_size);
++void bl_flash_fw_protect_allow_region(uint32_t addr, uint32_t size);
+ uint32_t bl_flash_get_size(void);
+ void* bl_flash_get_flashCfg(void);
+ 
+diff --git a/stage/littlefs/port/lfs_xip_flash.c b/stage/littlefs/port/lfs_xip_flash.c
+index 2835b2a..2b68465 100644
+--- a/stage/littlefs/port/lfs_xip_flash.c
++++ b/stage/littlefs/port/lfs_xip_flash.c
+@@ -106,6 +106,7 @@ lfs_t *lfs_xip_init(void)
+           info.size);
+     lfs_xip_ctx.flash_addr = info.offset;
+     cfg.block_count = info.size / LITTLEFS_FLASH_BLOCK_SIZE;
++    bl_flash_fw_protect_allow_region(info.offset, info.size);
+     bl_mtd_close(handle);
+ #else
+     lfs_xip_ctx.flash_addr = CONFIG_LITTLEFS_FLASH_ADDRESS;
+@@ -238,8 +239,16 @@ int lfs_xip_flash_prog(const struct lfs_config *c, lfs_block_t block,
+     return ret;
+ #else
+     struct lfs_context *ctx = c->context;
++#if defined(BL702) || defined(BL702L) || defined(BL602)
++    int flags = bl_irq_save();
++    int ret = bl_flash_write_need_lock(ctx->flash_addr + block * c->block_size + off,
++                                       (uint8_t *) buffer, size);
++    bl_irq_restore(flags);
++    return ret;
++#else
+     return bl_flash_write(ctx->flash_addr + block * c->block_size + off,
+-                            (uint8_t *)buffer, size);
++                          (uint8_t *) buffer, size);
++#endif
+ #endif
+ }
+ 
+@@ -274,8 +283,15 @@ int lfs_xip_flash_erase(const struct lfs_config *c, lfs_block_t block)
+     return ret;
+ #else
+     struct lfs_context *ctx = c->context;
++#if defined(BL702) || defined(BL702L) || defined(BL602)
++    int flags = bl_irq_save();
++    int ret = bl_flash_erase_need_lock(ctx->flash_addr + block * c->block_size, c->block_size);
++    bl_irq_restore(flags);
++    return ret;
++#else
+     return bl_flash_erase(ctx->flash_addr + block * c->block_size, c->block_size);
+ #endif
++#endif
+ }
+ 
+ /*****************************************************************************
