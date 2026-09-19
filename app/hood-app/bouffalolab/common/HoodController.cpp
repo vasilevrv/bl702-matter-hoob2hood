@@ -196,3 +196,54 @@ void HoodController::ApplyLightSetting()
         ChipLogError(NotSpecified, "Hood UART light write failed");
     }
 }
+
+void HoodController::CycleLocalMode()
+{
+    bool lightOn = false;
+    Nullable<uint8_t> speedSetting;
+
+    if (OnOff::Attributes::OnOff::Get(kLightEndpoint, &lightOn) != Status::Success ||
+        FanControl::Attributes::SpeedSetting::Get(kFanEndpoint, speedSetting) != Status::Success)
+    {
+        ChipLogError(NotSpecified, "D27 mode change: failed to read Matter state");
+        return;
+    }
+
+    const uint8_t currentSpeed = speedSetting.IsNull() ? 0U : speedSetting.Value();
+    bool nextLight             = false;
+    uint8_t nextSpeed          = 0;
+
+    if (!lightOn && currentSpeed == 0U)
+    {
+        // all off -> light
+        nextLight = true;
+    }
+    else if (lightOn && currentSpeed < 3U)
+    {
+        // light -> light+1 -> light+2 -> light+3
+        nextLight = true;
+        nextSpeed = static_cast<uint8_t>(currentSpeed + 1U);
+    }
+    // Every other state (including intensive speed 4) advances to all off.
+
+    const Nullable<uint8_t> requestedSpeed(nextSpeed);
+    const Nullable<Percent> requestedPercent(static_cast<Percent>(nextSpeed * 25U));
+
+    const Status speedStatus   = FanControl::Attributes::SpeedSetting::Set(kFanEndpoint, requestedSpeed);
+    const Status percentStatus = FanControl::Attributes::PercentSetting::Set(kFanEndpoint, requestedPercent);
+    const Status lightStatus   = OnOff::Attributes::OnOff::Set(kLightEndpoint, nextLight);
+
+    if (speedStatus != Status::Success || percentStatus != Status::Success || lightStatus != Status::Success)
+    {
+        ChipLogError(NotSpecified, "D27 mode change: failed to update Matter attributes");
+        return;
+    }
+
+    // We are already on the CHIP event-loop task, so apply the new state now.
+    // Attribute callbacks may schedule another pass, which is harmless because
+    // the UART layer suppresses duplicate bytes.
+    ApplyFanSetting();
+    ApplyLightSetting();
+    ChipLogProgress(NotSpecified, "D27 mode: light=%s fan=%u", nextLight ? "on" : "off",
+                    static_cast<unsigned>(nextSpeed));
+}

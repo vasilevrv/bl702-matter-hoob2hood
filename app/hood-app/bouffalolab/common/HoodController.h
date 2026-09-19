@@ -9,6 +9,7 @@ public:
     static void ApplyFanSetting();
     static void ApplyFanMode();
     static void ApplyLightSetting();
+    static void CycleLocalMode();
 
 private:
     static void ApplyFanSpeed(uint8_t speed, bool updateMode);

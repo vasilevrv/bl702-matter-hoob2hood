@@ -128,16 +128,21 @@ void AppTask::AppTaskMain(void * argument)
     }
 
     bl_gpio_enable_input(APP_FACTORY_RESET_PIN, 1, 0);
-    ChipLogProgress(NotSpecified, "Factory reset input ready: hold D27 to GND for 5 seconds");
+    ChipLogProgress(NotSpecified,
+                    "D27 button ready: short press cycles modes, "
+                    "hold 5 seconds for factory reset");
 
-    bool factoryResetPinActive       = false;
-    TickType_t factoryResetPressedAt = 0;
+    bool buttonRawLow             = false;
+    bool buttonStableLow          = false;
+    bool longPressHandled         = false;
+    TickType_t buttonRawChangedAt = xTaskGetTickCount();
+    TickType_t buttonPressedAt    = 0;
 
     while (true)
     {
         uint32_t events = APP_EVENT_NONE;
         const BaseType_t notified =
-            xTaskNotifyWait(0, UINT32_MAX, &events, pdMS_TO_TICKS(APP_FACTORY_RESET_POLL_MS));
+            xTaskNotifyWait(0, UINT32_MAX, &events, pdMS_TO_TICKS(APP_BUTTON_POLL_MS));
 
         if (notified == pdTRUE && (events & APP_EVENT_RESET_WINDOW_EXPIRE) != 0U)
         {
@@ -164,24 +169,40 @@ void AppTask::AppTaskMain(void * argument)
             }
         }
 
-        const bool factoryResetPinLow = (bl_gpio_input_get_value(APP_FACTORY_RESET_PIN) == 0);
-        if (!factoryResetPinLow)
-        {
-            factoryResetPinActive = false;
-            continue;
-        }
-
         const TickType_t now = xTaskGetTickCount();
-        if (!factoryResetPinActive)
+        const bool rawLow    = (bl_gpio_input_get_value(APP_FACTORY_RESET_PIN) == 0);
+
+        if (rawLow != buttonRawLow)
         {
-            factoryResetPinActive   = true;
-            factoryResetPressedAt   = now;
-            ChipLogProgress(NotSpecified, "D27 is low; keep holding for factory reset");
-            continue;
+            buttonRawLow       = rawLow;
+            buttonRawChangedAt = now;
         }
 
-        if ((now - factoryResetPressedAt) >= pdMS_TO_TICKS(APP_FACTORY_RESET_HOLD_MS))
+        if (buttonRawLow != buttonStableLow &&
+            (now - buttonRawChangedAt) >= pdMS_TO_TICKS(APP_BUTTON_DEBOUNCE_MS))
         {
+            buttonStableLow = buttonRawLow;
+
+            if (buttonStableLow)
+            {
+                buttonPressedAt  = now;
+                longPressHandled = false;
+            }
+            else if (!longPressHandled)
+            {
+                scheduleError = PlatformMgr().ScheduleWork([](intptr_t) { HoodController::CycleLocalMode(); });
+                if (scheduleError != CHIP_NO_ERROR)
+                {
+                    ChipLogError(NotSpecified, "Failed to schedule D27 mode change: %" CHIP_ERROR_FORMAT,
+                                 scheduleError.Format());
+                }
+            }
+        }
+
+        if (buttonStableLow && !longPressHandled &&
+            (now - buttonPressedAt) >= pdMS_TO_TICKS(APP_FACTORY_RESET_HOLD_MS))
+        {
+            longPressHandled = true;
             ChipLogProgress(NotSpecified, "D27 held low: Matter factory reset");
             ConfigurationMgr().InitiateFactoryReset();
             vTaskSuspend(nullptr);
