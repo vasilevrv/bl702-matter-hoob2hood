@@ -124,7 +124,7 @@ Do not power the XT-ZB2 from 5 V through a resistor divider. Use a proper 3.3 V 
 - dependencies are pinned to complete commit SHAs;
 - the data model (`.zap` and `.matter`) is generated with tools from the same pinned Matter revision;
 - vendor changes are applied as separate, verifiable patch files;
-- GitHub Actions runs the same `./scripts/build.sh` command and stores the resulting `.bin` as an artifact.
+- GitHub Actions runs the same `./scripts/build.sh` command only when a release is published, then attaches the `.bin`, link map, and partition table directly to that release.
 
 Every vendor modification is documented in [docs/vendor-patches.md](docs/vendor-patches.md).
 

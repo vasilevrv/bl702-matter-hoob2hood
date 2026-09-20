@@ -1,9 +1,11 @@
-name: Build firmware
+name: Build release firmware
 
 on:
-  push:
-  pull_request:
-  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -13,12 +15,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build
         run: ./scripts/build.sh
-      - name: Upload firmware
-        uses: actions/upload-artifact@v4
-        with:
-          name: hob2hood-bl702
-          path: |
-            out/hob2hood/chip-bl702-hood-example.bin
-            out/hob2hood/chip-bl702-hood-example.out.map
-            config/partition_cfg_2M.toml
-
+      - name: Attach firmware to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload "${RELEASE_TAG}" \
+            out/hob2hood/chip-bl702-hood-example.bin \
+            out/hob2hood/chip-bl702-hood-example.out.map \
+            config/partition_cfg_2M.toml \
+            --clobber
