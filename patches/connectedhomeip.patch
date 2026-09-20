@@ -37,6 +37,18 @@ index a5052f72..b7d6f1a5 100644
          }
          break;
  #endif
+diff --git a/scripts/tests/requirements.txt b/scripts/tests/requirements.txt
+index 0289e0117f..ba112afedc 100644
+--- a/scripts/tests/requirements.txt
++++ b/scripts/tests/requirements.txt
+@@ -1,6 +1,6 @@
+ # Python requirements for scripts in this location
+ alive_progress
+-bluezoo>=1.0.2; sys_platform == "linux"
++bluezoo>=1.0.2; sys_platform == "linux" and python_version >= "3.11"
+ click
+ colorama
+ coloredlogs
 diff --git a/src/app/clusters/network-commissioning/ThreadScanResponse.cpp b/src/app/clusters/network-commissioning/ThreadScanResponse.cpp
 index 8890e4a4..bf8076a6 100644
 --- a/src/app/clusters/network-commissioning/ThreadScanResponse.cpp

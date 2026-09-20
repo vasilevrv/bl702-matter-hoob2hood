@@ -1,133 +1,133 @@
-# Hob2Hood Matter для XT-ZB2 (BL702)
+# Hob2Hood Matter for XT-ZB2 (BL702)
 
-Прошивка превращает модуль XT-ZB2 в устройство Matter over Thread для управления вытяжкой. В Home Assistant появляются вентилятор с четырьмя скоростями и отдельный свет. Команды передаются управляющему МК вытяжки через UART.
+This firmware turns an XT-ZB2 module into a Matter over Thread device for controlling a range hood. Home Assistant exposes a four-speed fan and a separate light. Commands are sent to the hood controller over UART.
 
-## Что умеет прошивка
+## Features
 
-- Matter over Thread, commissioning через BLE;
-- endpoint 1 — Matter Fan Control, скорости 0–4;
-- endpoint 2 — Matter On/Off для света;
-- UART1 TX на D23, RX на D25, 1200 baud, 8N1;
-- кнопка D27 с программным подавлением дребезга: короткое нажатие переключает режим, удержание 5 секунд выполняет factory reset;
-- имя продукта `Hob2Hood`, производитель `Salu Workshop`, аппаратная версия `BL702`.
+- Matter over Thread with BLE commissioning;
+- endpoint 1: Matter Fan Control with speeds 0-4;
+- endpoint 2: Matter On/Off for the light;
+- UART1 TX on D23 and RX on D25, 1200 baud, 8N1;
+- debounced button on D27: a short press cycles through operating modes, while a five-second hold performs a factory reset;
+- product name `Hob2Hood`, manufacturer `Salu Workshop`, and hardware version `BL702`.
 
-UART-команды:
+UART commands:
 
-| Состояние | Байт |
+| State | Byte |
 |---|---:|
-| Вентилятор выключен | `0` |
-| Скорость 1 | `1` |
-| Скорость 2 | `2` |
-| Скорость 3 | `3` |
-| Интенсивный режим | `4` |
-| Свет включён | `L` |
-| Свет выключен | `l` |
+| Fan off | `0` |
+| Speed 1 | `1` |
+| Speed 2 | `2` |
+| Speed 3 | `3` |
+| Intensive mode | `4` |
+| Light on | `L` |
+| Light off | `l` |
 
-Короткие нажатия D27 переключают состояния по кругу:
+Short presses of D27 cycle through these states:
 
 ```text
-свет → свет + скорость 1 → свет + скорость 2 → свет + скорость 3 → всё выключено
+light -> light + speed 1 -> light + speed 2 -> light + speed 3 -> all off
 ```
 
-Переключение происходит после отпускания кнопки. Удержание не отправляет обычную команду и через 5 секунд запускает Matter factory reset.
+The mode changes after the button is released. A long press does not send a normal command; after five seconds it starts a Matter factory reset.
 
-## Поддерживаемые машины сборки
+## Supported build hosts
 
 - Linux x86_64;
 - Intel macOS x86_64.
 
-В зафиксированной версии Bouffalo SDK компилятор для macOS собран только под x86_64. На Apple Silicon сборку можно запускать под Rosetta; скрипт намеренно не пытается делать это автоматически.
+The compiler included in the pinned Bouffalo SDK is available for x86_64 macOS only. On Apple Silicon, run the build under Rosetta; the script intentionally does not enable Rosetta automatically.
 
 ```bash
 arch -x86_64 ./scripts/build.sh
 ```
 
-Понадобятся Git, Python 3 и стандартные инструменты сборки. На Ubuntu достаточно начать с:
+Git, Python 3, and standard build tools are required. On Ubuntu, start with:
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y git python3 curl unzip xz-utils build-essential
 ```
 
-## Сборка с нуля
+## Building from scratch
 
 ```bash
-git clone <URL-этого-репозитория>
+git clone <REPOSITORY-URL>
 cd hob2hood-matter
 ./scripts/build.sh
 ```
 
-Первый запуск скачивает зафиксированные ревизии Matter, Bouffalo SDK и нужные submodule. Это занимает заметное время и несколько гигабайт. Повторная сборка использует каталог `deps/`.
+The first build downloads the pinned Matter and Bouffalo SDK revisions together with the required submodules. This takes some time and several gigabytes of disk space. Subsequent builds reuse the `deps/` directory.
 
-Готовая прошивка:
+The resulting firmware is written to:
 
 ```text
 out/hob2hood/chip-bl702-hood-example.bin
 ```
 
-Во время генерации ZAP выводит предупреждения о сокращённом наборе кластеров света и Thread Diagnostics. Это ожидаемо: необязательная для Home Assistant функциональность удалена ради RAM BL702. Сборка при этих предупреждениях продолжается.
+ZAP may print warnings about the reduced light cluster set and Thread Diagnostics during code generation. This is expected: optional functionality that Home Assistant does not need was removed to conserve BL702 RAM. The build continues after these warnings.
 
-Отдельно подготовить зависимости без сборки можно командой:
+To prepare the dependencies without building the firmware, run:
 
 ```bash
 ./scripts/bootstrap.sh
 ```
 
-Зафиксированные upstream-репозитории и commit SHA находятся в `versions.env`. Исходники приложения хранятся в `app/hood-app`, а минимальные изменения вендорского кода — в `patches/`.
+Pinned upstream repositories and commit SHAs are defined in `versions.env`. Application sources are stored in `app/hood-app`, while the minimal vendor changes are kept in `patches/`.
 
-## Прошивка
+## Flashing
 
-Переведите BL702 в UART boot mode тем же способом, которым прошивали тестовые примеры, подключите USB–UART и выполните:
+Put the BL702 into UART boot mode in the same way used for the test examples, connect a USB-to-UART adapter, and run:
 
 ```bash
 ./scripts/flash.sh /dev/ttyUSB0
 ```
 
-По умолчанию используется 500000 baud. При необходимости:
+The default flashing baud rate is 500000. To use a different rate:
 
 ```bash
 BAUD=115200 ./scripts/flash.sh /dev/ttyUSB0
 ```
 
-Скрипт всегда использует:
+The script always uses:
 
-- flash layout на 2 MiB из `config/partition_cfg_2M.toml`;
-- кварц `32M`;
-- стандартный Bouffalo boot2 `v6.4-rc6`;
-- без Device Tree image.
+- the 2 MiB flash layout from `config/partition_cfg_2M.toml`;
+- the `32M` crystal setting;
+- the standard Bouffalo boot2 `v6.4-rc6`;
+- no Device Tree image.
 
-После успешной прошивки уберите модуль из boot mode и перезагрузите. Отладочный UART работает на 115200 8N1.
+After flashing succeeds, take the module out of boot mode and reboot it. The debug UART runs at 115200 baud, 8N1.
 
-## Добавление в Home Assistant
+## Adding the device to Home Assistant
 
-Нужны работающая интеграция Matter, Thread Border Router и актуальные Thread credentials на телефоне.
+A working Matter integration, a Thread Border Router, and current Thread credentials on the phone are required.
 
-1. В Home Assistant откройте добавление Matter-устройства.
-2. Используйте ручной код `34970112332` или QR-код из загрузочного лога.
-3. После commissioning устройство появится как `Hob2Hood`.
+1. In Home Assistant, start adding a Matter device.
+2. Enter the manual setup code `34970112332` or scan the QR code printed in the boot log.
+3. After commissioning, the device appears as `Hob2Hood`.
 
-Если устройство уже было добавлено или удалено из Home Assistant, сначала выполните factory reset: на нормально загруженном модуле замкните D27 на GND и удерживайте 5 секунд. Также предусмотрен сброс тремя быстрыми перезагрузками, но D27 надёжнее.
+If the device has already been commissioned or was removed from Home Assistant, perform a factory reset first: with the module running normally, connect D27 to GND and hold it for five seconds. A reset after three quick power cycles is also implemented, but using D27 is more reliable.
 
-## Подключение к МК вытяжки
+## Connecting the hood controller
 
 ```text
-XT-ZB2 D23 (TX, 3.3 V)  -> RX управляющего МК
-XT-ZB2 GND               -> GND управляющего МК
+XT-ZB2 D23 (TX, 3.3 V)  -> hood controller RX
+XT-ZB2 GND               -> hood controller GND
 ```
 
-D25 нужен только если позже потребуется обратный канал. Перед соединением проверьте, что вход 5-вольтового МК распознаёт 3.3 V как логическую единицу. Подавать 5 V на входы BL702 нельзя.
+D25 is needed only if a return channel is added later. Before connecting the boards, verify that the input of the 5 V controller recognizes 3.3 V as a logic high. Never apply 5 V to a BL702 input.
 
-Питать XT-ZB2 от 5 V через резистивный делитель нельзя. Используйте нормальный стабилизатор 3.3 V с запасом по импульсному току и развязывающими конденсаторами.
+Do not power the XT-ZB2 from 5 V through a resistor divider. Use a proper 3.3 V regulator with enough transient-current headroom and suitable decoupling capacitors.
 
-## Воспроизводимость
+## Reproducibility
 
-- зависимости закреплены полными commit SHA;
-- data model (`.zap` и `.matter`) генерируется из примеров той же закреплённой версии Matter;
-- вендорские правки применяются отдельными проверяемыми patch-файлами;
-- GitHub Actions выполняет ту же команду `./scripts/build.sh` и сохраняет `.bin` как artifact.
+- dependencies are pinned to complete commit SHAs;
+- the data model (`.zap` and `.matter`) is generated with tools from the same pinned Matter revision;
+- vendor changes are applied as separate, verifiable patch files;
+- GitHub Actions runs the same `./scripts/build.sh` command and stores the resulting `.bin` as an artifact.
 
-Описание каждой вендорской правки находится в [docs/vendor-patches.md](docs/vendor-patches.md).
+Every vendor modification is documented in [docs/vendor-patches.md](docs/vendor-patches.md).
 
-## Лицензии
+## Licenses
 
-Код приложения основан на Project CHIP/Matter и распространяется по Apache-2.0. Загружаемые зависимости сохраняют собственные лицензии; они не включаются в этот репозиторий.
+The application is based on Project CHIP/Matter and is distributed under the Apache License 2.0. Downloaded dependencies retain their respective licenses and are not included in this repository.
