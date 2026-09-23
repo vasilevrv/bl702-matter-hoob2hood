@@ -9,7 +9,7 @@ __stack_size = DEFINED(__stack_size) ? __stack_size : 2K;
 
 MEMORY
 {
-  flash  (rxai!w) : ORIGIN = 0x23000000, LENGTH = (2M)
+  flash  (rxai!w) : ORIGIN = 0x23000000, LENGTH = (1M)
   tcm_ocram (wxa) : ORIGIN = 0x42010000 + __CACHE_SIZE, LENGTH = (64K - __CACHE_SIZE + 64K - __EM_SIZE - __stack_size - __SHA_LINK_CFG_SIZE)
   sha_ocram (wxa) : ORIGIN = ORIGIN(tcm_ocram) + LENGTH(tcm_ocram), LENGTH = __SHA_LINK_CFG_SIZE
   sys_stack (wxa) : ORIGIN = ORIGIN(tcm_ocram) + LENGTH(tcm_ocram) + __SHA_LINK_CFG_SIZE, LENGTH = __stack_size

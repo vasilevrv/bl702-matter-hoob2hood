@@ -54,6 +54,7 @@ bl_iot_sdk("sdk") {
     "OPENTHREAD_FTD=0",
     "OPENTHREAD_MTD=1",
     "OTA_AUTO_REBOOT_DELAY=5",
+    "CHIP_DEVICE_CONFIG_ENABLE_OTA_REQUESTOR=0",
     "PRINT_DEBUG=0",
     "PW_RPC_ENABLED=0",
     "CHIP_DEVICE_CONFIG_ENABLE_ETHERNET=${chip_enable_ethernet}",

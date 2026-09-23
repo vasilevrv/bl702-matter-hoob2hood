@@ -72,6 +72,10 @@ if [[ ! -f "${FIRMWARE}" ]]; then
     exit 1
 fi
 
+OBJDUMP="${SDK_ROOT}/toolchain/riscv/$(uname -s)/bin/riscv64-unknown-elf-objdump"
+python3 "${PROJECT_ROOT}/scripts/verify_firmware.py" \
+    "${OBJDUMP}" "${OUT_DIR}/chip-bl702-hood-example.out" "${FIRMWARE}"
+
 echo
 echo "Firmware: ${FIRMWARE}"
 sha256sum "${FIRMWARE}" 2>/dev/null || shasum -a 256 "${FIRMWARE}"

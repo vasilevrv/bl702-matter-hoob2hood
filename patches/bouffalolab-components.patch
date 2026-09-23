@@ -1,3 +1,395 @@
+diff --git a/network/thread/openthread_port/ot_alarm.c b/network/thread/openthread_port/ot_alarm.c
+index 20cd8c2..545f0dd 100644
+--- a/network/thread/openthread_port/ot_alarm.c
++++ b/network/thread/openthread_port/ot_alarm.c
+@@ -28,14 +28,16 @@
+  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
+-#include <assert.h>
+-
+ #if defined(CONFIG_BL_SDK)
+ #include <compiler/compiler_ld.h>
+ #else
+ #include <compiler/common.h>
+ #endif
+ 
++#include <FreeRTOS.h>
++#include <timers.h>
++#include <bl_timer.h>
++
+ #include <lmac154.h>
+ #include <zb_timer.h>
+ 
+@@ -43,77 +45,89 @@
+ #include <openthread_port.h>
+ #include <openthread/platform/alarm-milli.h>
+ #include <openthread/platform/alarm-micro.h>
++#include <openthread/platform/time.h>
+ 
+-#define OT_ALARM_MAX_MILLI_SEC          (((uint64_t)1 << 36) / 1000)
+-
+-static int ot_alarm_timer_milli_sec_cnt = 0;
++static StaticTimer_t ot_alarm_milli_timer_storage;
++static TimerHandle_t ot_alarm_milli_timer;
+ 
+-void ot_alarmInit(void) {}
++/* Bound one FreeRTOS delay; the callback makes OpenThread re-evaluate longer deadlines. */
++#define OT_ALARM_MAX_CHUNK_MS 3600000U
+ 
+-ATTR_TCM_SECTION
+-static void otPlatALarm_msTimerCallback(void) 
++static void otPlatALarm_msTimerCallback(TimerHandle_t timer)
+ {
+-    ot_alarm_timer_milli_sec_cnt --;
++    (void) timer;
++    otrNotifyEvent(OT_SYSTEM_EVENT_ALARM_MS_EXPIRED);
++}
+ 
+-    if (ot_alarm_timer_milli_sec_cnt <= 0) {
+-        zb_timer_stop(ZB_TIMER_THREAD_MS);
+-        otrNotifyEvent(OT_SYSTEM_EVENT_ALARM_MS_EXPIRED);
+-    }
+-    else {
+-        zb_timer_start(ZB_TIMER_THREAD_MS, zb_timer_get_current_time(), otPlatALarm_msTimerCallback);
++void ot_alarmInit(void)
++{
++    if (ot_alarm_milli_timer == NULL) {
++        ot_alarm_milli_timer = xTimerCreateStatic("otMilli", 1, pdFALSE, NULL,
++                                                  otPlatALarm_msTimerCallback,
++                                                  &ot_alarm_milli_timer_storage);
++        configASSERT(ot_alarm_milli_timer != NULL);
+     }
+ }
+ 
+ void otPlatAlarmMilliStartAt(otInstance *aInstance, uint32_t aT0, uint32_t aDt)
+ {
+-    uint32_t tag, current, delay_cnt;
+-    uint64_t delta;
++    uint32_t current = (uint32_t)(bl_timer_now_us64() / 1000U);
++    uint32_t elapsed = current - aT0;
+ 
+-    assert(aT0 <= OT_ALARM_MAX_MILLI_SEC);
++    (void) aInstance;
+ 
+-    zb_timer_stop(ZB_TIMER_THREAD_MS);
+-    ot_alarm_timer_milli_sec_cnt = 0;
++    if (ot_alarm_milli_timer == NULL) {
++        otrNotifyEvent(OT_SYSTEM_EVENT_ALARM_MS_EXPIRED);
++        return;
++    }
+ 
+-    tag = otrEnterCrit();
+-    current = ((uint64_t)zb_timer_get_current_time() << ZB_TIMER_BITNUM_PER_TICK) / 1000;
+-    if (current - aT0 < aDt) {
+-        delta = (uint64_t)(aDt - (current - aT0));
+-        delay_cnt = ((delta % OT_ALARM_MAX_MILLI_SEC) * 1000) >> ZB_TIMER_BITNUM_PER_TICK;
+-        zb_timer_start(ZB_TIMER_THREAD_MS, zb_timer_get_current_time() + delay_cnt, otPlatALarm_msTimerCallback);
++    if (elapsed < aDt) {
++        uint32_t remaining = aDt - elapsed;
++        TickType_t delay = pdMS_TO_TICKS(remaining > OT_ALARM_MAX_CHUNK_MS ? OT_ALARM_MAX_CHUNK_MS : remaining);
++        BaseType_t result;
+ 
+-        ot_alarm_timer_milli_sec_cnt = (delta + OT_ALARM_MAX_MILLI_SEC - 1) / OT_ALARM_MAX_MILLI_SEC;
+-    }
++        if (delay == 0) {
++            delay = 1;
++        }
+ 
+-    current = ((uint64_t)zb_timer_get_current_time() << ZB_TIMER_BITNUM_PER_TICK) / 1000;
+-    if (current - aT0 >= aDt) {
+-        zb_timer_stop(ZB_TIMER_THREAD_MS);
+-        ot_alarm_timer_milli_sec_cnt = 0;
+-        otPlatALarm_msTimerCallback();
++        /* ChangePeriod also restarts an active timer, so no preceding Stop command is needed. */
++        result = xTimerChangePeriod(ot_alarm_milli_timer, delay, 0);
++        if (result == pdPASS) {
++            return;
++        }
+     }
+ 
+-    otrExitCrit(tag);
++    /* Stop a stale deadline, then let OpenThread re-evaluate its timers. */
++    (void) xTimerStop(ot_alarm_milli_timer, 0);
++    otrNotifyEvent(OT_SYSTEM_EVENT_ALARM_MS_EXPIRED);
+ }
+ 
+ void otPlatAlarmMilliStop(otInstance *aInstance) 
+ {
+-    zb_timer_stop(ZB_TIMER_THREAD_MS);
++    (void) aInstance;
++
++    if (ot_alarm_milli_timer != NULL) {
++        (void) xTimerStop(ot_alarm_milli_timer, 0);
++    }
+ }
+ 
+ uint32_t otPlatAlarmMilliGetNow(void) 
+ {
+-    return (uint32_t)(((uint64_t)zb_timer_get_current_time() << ZB_TIMER_BITNUM_PER_TICK) / 1000);
++    /* The LMAC154 64-bit API wraps with its underlying 32-bit symbol counter. */
++    return (uint32_t)(bl_timer_now_us64() / 1000U);
+ }
+ 
+ uint64_t otPlatTimeGet(void)
+ {
+-    return (uint64_t)zb_timer_get_current_time() << ZB_TIMER_BITNUM_PER_TICK;
++    return bl_timer_now_us64();
+ }
+ 
+-uint16_t otPlatTimeGetXtalAccuracy(void) { return 0; }
++uint16_t otPlatTimeGetXtalAccuracy(void) { return OPENTHREAD_CONFIG_PLATFORM_XTAL_ACCURACY; }
+ 
+ uint64_t otPlatRadioGetNow(otInstance *aInstance)
+ {
+-    return (uint64_t)zb_timer_get_current_time() << ZB_TIMER_BITNUM_PER_TICK;
++    (void) aInstance;
++    return bl_timer_now_us64();
+ }
+ 
+ #if OPENTHREAD_CONFIG_PLATFORM_USEC_TIMER_ENABLE
+@@ -126,19 +140,20 @@ static void otPlatALarm_usTimerCallback(void)
+ 
+ void otPlatAlarmMicroStartAt(otInstance *aInstance, uint32_t aT0, uint32_t aDt)
+ {
+-    uint32_t tag, current;
++    uint32_t tag;
++    uint32_t current;
+     uint64_t delta;
+ 
+     zb_timer_stop(ZB_TIMER_THREAD_US);
+ 
+     tag = otrEnterCrit();
+-    current = zb_timer_get_current_time() << ZB_TIMER_BITNUM_PER_TICK;
++    current = (uint32_t) bl_timer_now_us64();
+     if (current - aT0 < aDt) {
+-        delta = ((uint64_t)(aDt - (current - aT0)) + (1 << ZB_TIMER_BITNUM_PER_TICK) / 2) >> ZB_TIMER_BITNUM_PER_TICK;
++        delta = ((uint64_t)(aDt - (current - aT0)) + (ZB_TIMER_US_PER_TICK / 2)) >> ZB_TIMER_BITNUM_PER_TICK;
+         zb_timer_start(ZB_TIMER_THREAD_US, zb_timer_get_current_time() + delta, otPlatALarm_usTimerCallback);
+     }
+ 
+-    current = zb_timer_get_current_time() << ZB_TIMER_BITNUM_PER_TICK;
++    current = (uint32_t) bl_timer_now_us64();
+     if (current - aT0 >= aDt) {
+         zb_timer_stop(ZB_TIMER_THREAD_US);
+         otPlatALarm_usTimerCallback();
+@@ -153,7 +168,7 @@ void otPlatAlarmMicroStop(otInstance *aInstance)
+ 
+ uint32_t otPlatAlarmMicroGetNow(void)
+ {
+-    return (uint32_t)((uint64_t)zb_timer_get_current_time() << ZB_TIMER_BITNUM_PER_TICK);
++    return (uint32_t) bl_timer_now_us64();
+ }
+ #endif
+ 
+diff --git a/network/thread/openthread_port/ot_settings_littlefs.c b/network/thread/openthread_port/ot_settings_littlefs.c
+index 05614e9..01f55f6 100644
+--- a/network/thread/openthread_port/ot_settings_littlefs.c
++++ b/network/thread/openthread_port/ot_settings_littlefs.c
+@@ -76,6 +76,11 @@ void otPlatSettingsInit(otInstance *aInstance, const uint16_t *aSensitiveKeys, u
+ #endif
+     }
+ 
++    if (lfs == NULL) {
++        printf("[LFS] OpenThread settings init failed\r\n");
++        return;
++    }
++
+     OT_UNUSED_VARIABLE(aInstance);
+     OT_UNUSED_VARIABLE(aSensitiveKeys);
+     OT_UNUSED_VARIABLE(aSensitiveKeysLength);
+@@ -92,14 +97,17 @@ void otPlatSettingsInit(otInstance *aInstance, const uint16_t *aSensitiveKeys, u
+     }
+ 
+     ret = lfs_mkdir(lfs, OPENTHREAD_LFS_NAMESPACE);
+-    assert(ret == LFS_ERR_OK);
++    if (ret != LFS_ERR_OK) {
++        printf("[LFS] OpenThread settings namespace creation failed: %d\r\n", ret);
++    }
+ }
+ 
+ otError otPlatSettingsGet(otInstance *aInstance, uint16_t aKey, int aIndex, uint8_t *aValue, uint16_t *aValueLength)
+ {
+     char            key[OT_MAX_KEY_LEN];
+     lfs_file_t      file;
+-    int             ret = LFS_ERR_OK;
++    int             ret      = LFS_ERR_OK;
++    bool            fileOpen = false;
+ 
+     OT_UNUSED_VARIABLE(aInstance);
+     if (0 != aIndex) {
+@@ -122,17 +130,40 @@ otError otPlatSettingsGet(otInstance *aInstance, uint16_t aKey, int aIndex, uint
+         if (ret != LFS_ERR_OK) {
+             break;
+         }
+-
+-        if (aValue && aValueLength) {
+-            ret = lfs_file_read(lfs, &file, aValue, *aValueLength);
+-            *aValueLength = ret;
++        fileOpen = true;
++
++        if (aValueLength) {
++            lfs_soff_t fileSize = lfs_file_size(lfs, &file);
++            if (fileSize < LFS_ERR_OK || fileSize > UINT16_MAX) {
++                ret = LFS_ERR_IO;
++            } else if (aValue) {
++                lfs_size_t readLength = *aValueLength < fileSize ? *aValueLength : fileSize;
++                ret = lfs_file_read(lfs, &file, aValue, readLength);
++                if (ret == readLength) {
++                    *aValueLength = (uint16_t) fileSize;
++                } else if (ret >= LFS_ERR_OK) {
++                    ret = LFS_ERR_IO;
++                }
++            } else {
++                *aValueLength = (uint16_t) fileSize;
++            }
++        }
++        int closeResult = lfs_file_close(lfs, &file);
++        fileOpen = false;
++        if (ret >= LFS_ERR_OK) {
++            ret = closeResult;
+         }
+-        lfs_file_close(lfs, &file);
+     } while(0);
+ 
++    if (fileOpen) {
++        lfs_file_close(lfs, &file);
++    }
+     lfs->cfg->unlock(lfs->cfg);
+ 
+-    return ret >= LFS_ERR_OK ? OT_ERROR_NONE: OT_ERROR_NOT_FOUND;
++    if (ret == LFS_ERR_NOENT) {
++        return OT_ERROR_NOT_FOUND;
++    }
++    return ret >= LFS_ERR_OK ? OT_ERROR_NONE : OT_ERROR_FAILED;
+ }
+ 
+ otError otPlatSettingsSet(otInstance *aInstance, uint16_t aKey, const uint8_t *aValue, uint16_t aValueLength)
+@@ -140,6 +171,7 @@ otError otPlatSettingsSet(otInstance *aInstance, uint16_t aKey, const uint8_t *a
+     char         key[OT_MAX_KEY_LEN];
+     lfs_file_t   file;
+     int          ret = LFS_ERR_OK;
++    bool         fileOpen = false;
+ 
+     OT_UNUSED_VARIABLE(aInstance);
+ 
+@@ -155,17 +187,24 @@ otError otPlatSettingsSet(otInstance *aInstance, uint16_t aKey, const uint8_t *a
+     lfs->cfg->lock(lfs->cfg);
+ 
+     do {
+-        ret = lfs_file_open(lfs, &file, key, LFS_O_CREAT | LFS_O_RDWR);
++        ret = lfs_file_open(lfs, &file, key, LFS_O_CREAT | LFS_O_RDWR | LFS_O_TRUNC);
+         if (ret != LFS_ERR_OK) {
+             break;
+         }
++        fileOpen = true;
+ 
+         if (aValue && aValueLength) {
+             ret = lfs_file_write(lfs, &file, aValue, aValueLength);
+         }
+-        lfs_file_close(lfs, &file);
++        int writeResult = ret;
++        int closeResult = lfs_file_close(lfs, &file);
++        fileOpen = false;
++        ret = (writeResult == aValueLength) ? closeResult : LFS_ERR_IO;
+     } while(0);
+ 
++    if (fileOpen) {
++        lfs_file_close(lfs, &file);
++    }
+     lfs->cfg->unlock(lfs->cfg);
+ 
+     return ret >= LFS_ERR_OK ? OT_ERROR_NONE: OT_ERROR_FAILED;
+@@ -191,7 +230,9 @@ otError otPlatSettingsDelete(otInstance *aInstance, uint16_t aKey, int aIndex)
+         snprintf(key, OT_MAX_KEY_LEN, "%s/_nl%04x", OPENTHREAD_LFS_NAMESPACE, aKey);
+     }
+     
++    lfs->cfg->lock(lfs->cfg);
+     ret = lfs_remove(lfs, key);
++    lfs->cfg->unlock(lfs->cfg);
+     return (ret >= LFS_ERR_OK || ret == LFS_ERR_NOENT) ? OT_ERROR_NONE: OT_ERROR_FAILED;
+ }
+ 
+@@ -202,6 +243,8 @@ void otPlatSettingsWipe(otInstance *aInstance)
+     int              ret = LFS_ERR_OK;
+     lfs_dir_t        dir = {};
+     struct lfs_info  info = {};
++    bool             dirOpen = false;
++    bool             wipeOk = true;
+ 
+     OT_UNUSED_VARIABLE(aInstance);
+ 
+@@ -212,18 +255,29 @@ void otPlatSettingsWipe(otInstance *aInstance)
+     do {
+         ret = lfs_file_open(lfs, &file, OPENTHREAD_LFS_WIPE_FLAG, LFS_O_CREAT | LFS_O_RDWR);
+         if (ret != LFS_ERR_OK) {
++            wipeOk = false;
++            break;
++        }
++        ret = lfs_file_close(lfs, &file);
++        if (ret != LFS_ERR_OK) {
++            wipeOk = false;
+             break;
+         }
+-        lfs_file_close(lfs, &file);
+ 
+         ret = lfs_dir_open(lfs, &dir, OPENTHREAD_LFS_NAMESPACE);
+         if (ret < LFS_ERR_OK) {
++            wipeOk = false;
+             break;
+         }
++        dirOpen = true;
+ 
+         while (1) {
+             ret = lfs_dir_read(lfs, &dir, &info);
+-            if (ret <= LFS_ERR_OK) {
++            if (ret == 0) {
++                break;
++            }
++            if (ret < LFS_ERR_OK) {
++                wipeOk = false;
+                 break;
+             }
+ 
+@@ -232,21 +286,35 @@ void otPlatSettingsWipe(otInstance *aInstance)
+             }
+ 
+             ret = snprintf(key, OT_MAX_KEY_LEN, "%s/%s", OPENTHREAD_LFS_NAMESPACE, info.name);
+-            if (ret > OT_MAX_KEY_LEN) {
++            if (ret < 0 || ret >= OT_MAX_KEY_LEN) {
++                wipeOk = false;
+                 continue;
+             }
+ 
+             ret = lfs_remove(lfs, key); 
+             if (ret < LFS_ERR_OK) {
++                wipeOk = false;
+                 break;
+             }
+         }
+ 
+-        lfs_dir_close(lfs, &dir);
++        ret = lfs_dir_close(lfs, &dir);
++        dirOpen = false;
++        if (ret != LFS_ERR_OK) {
++            wipeOk = false;
++        }
+ 
+-        lfs_remove(lfs, OPENTHREAD_LFS_WIPE_FLAG);
++        if (wipeOk) {
++            ret = lfs_remove(lfs, OPENTHREAD_LFS_WIPE_FLAG);
++            if (ret != LFS_ERR_OK && ret != LFS_ERR_NOENT) {
++                wipeOk = false;
++            }
++        }
+     } while(0);
+ 
++    if (dirOpen) {
++        lfs_dir_close(lfs, &dir);
++    }
+     lfs->cfg->unlock(lfs->cfg);
+ }
+ 
 diff --git a/network/thread/openthread_port/ot_sys_iot.c b/network/thread/openthread_port/ot_sys_iot.c
 index f390f5d..9f1a8c6 100644
 --- a/network/thread/openthread_port/ot_sys_iot.c
@@ -19,7 +411,7 @@ index f390f5d..9f1a8c6 100644
 \ No newline at end of file
 +}
 diff --git a/platform/hosal/bl702_hal/bl_flash.c b/platform/hosal/bl702_hal/bl_flash.c
-index 07b6594..d4ac6af 100644
+index 07b6594..d5597ff 100644
 --- a/platform/hosal/bl702_hal/bl_flash.c
 +++ b/platform/hosal/bl702_hal/bl_flash.c
 @@ -63,6 +63,8 @@ static uint32_t fw_start_addr = 0;
@@ -31,7 +423,12 @@ index 07b6594..d4ac6af 100644
  
  static uint32_t flash_size = 0;
  
-@@ -85,11 +87,12 @@ int bl_flash_erase(uint32_t addr, int len)
+@@ -82,14 +84,17 @@ __attribute__((always_inline)) __STATIC_INLINE uint32_t __get_SP(void)
+ 
+ int bl_flash_erase(uint32_t addr, int len)
+ {
++    int result;
++
      if(fw_protect_en){
          uint32_t start_addr = addr & 0xFFFFF000;
          uint32_t end_addr = (addr + len + 0xFFF) & 0xFFFFF000;
@@ -46,7 +443,23 @@ index 07b6594..d4ac6af 100644
              blog_error("[FLASH] Attempt to erase pt region, start_addr 0x%08lx, end_addr 0x%08lx\r\n", start_addr, end_addr);
              return -1;
          }
-@@ -119,11 +122,12 @@ int bl_flash_write(uint32_t addr, uint8_t *src, int len)
+@@ -106,24 +111,26 @@ int bl_flash_erase(uint32_t addr, int len)
+     unsigned long mstatus_tmp;
+     mstatus_tmp = read_csr(mstatus);
+     clear_csr(mstatus, MSTATUS_MIE);
+-    bl_flash_erase_need_lock(addr, len);
++    result = bl_flash_erase_need_lock(addr, len);
+     write_csr(mstatus, mstatus_tmp);
+ 
+-    return 0;
++    return result;
+ }
+ 
+ int bl_flash_write(uint32_t addr, uint8_t *src, int len)
+ {
+     uint8_t* _data = src;
++    int result;
+ 
      if(fw_protect_en){
          uint32_t start_addr = addr;
          uint32_t end_addr = addr + len;
@@ -61,44 +474,240 @@ index 07b6594..d4ac6af 100644
              blog_error("[FLASH] Attempt to write pt region, start_addr 0x%08lx, end_addr 0x%08lx\r\n", start_addr, end_addr);
              return -1;
          }
-@@ -376,6 +380,12 @@ int bl_flash_fw_protect_set(uint8_t en, uint32_t fw_addr, uint32_t fw_size, uint
+@@ -153,7 +160,7 @@ int bl_flash_write(uint32_t addr, uint8_t *src, int len)
+     unsigned long mstatus_tmp;
+     mstatus_tmp = read_csr(mstatus);
+     clear_csr(mstatus, MSTATUS_MIE);
+-    bl_flash_write_need_lock(addr, _data, len);
++    result = bl_flash_write_need_lock(addr, _data, len);
+     write_csr(mstatus, mstatus_tmp);
+ 
+ #ifdef CFG_USE_PSRAM
+@@ -162,12 +169,13 @@ int bl_flash_write(uint32_t addr, uint8_t *src, int len)
+     }
+ #endif
+ 
+-    return 0;
++    return result;
+ }
+ 
+ int bl_flash_read(uint32_t addr, uint8_t *dst, int len)
+ {
+     uint8_t* _data = dst;
++    int result;
+ 
+ #ifdef CFG_USE_PSRAM
+     if(IS_PSARAM((uint32_t)dst)){
+@@ -184,7 +192,7 @@ int bl_flash_read(uint32_t addr, uint8_t *dst, int len)
+     unsigned long mstatus_tmp;
+     mstatus_tmp = read_csr(mstatus);
+     clear_csr(mstatus, MSTATUS_MIE);
+-    bl_flash_read_need_lock(addr, _data, len);
++    result = bl_flash_read_need_lock(addr, _data, len);
+     write_csr(mstatus, mstatus_tmp);
+ 
+ #ifdef CFG_USE_PSRAM
+@@ -194,15 +202,17 @@ int bl_flash_read(uint32_t addr, uint8_t *dst, int len)
+     }
+ #endif
+ 
+-    return 0;
++    return result;
+ }
+ 
+ 
+ ATTR_TCM_SECTION
+ static __attribute__((noinline)) int bl_flash_erase_need_lock_internal(uint32_t addr, int len)
+ {
++    BL_Err_Type result;
++
+     XIP_SFlash_Opt_Enter();
+-    RomDriver_XIP_SFlash_Erase_Need_Lock(
++    result = RomDriver_XIP_SFlash_Erase_Need_Lock(
+             &boot2_flashCfg.flashCfg,
+             boot2_flashCfg.flashCfg.ioMode&0xf,
+             addr,
+@@ -210,14 +220,16 @@ static __attribute__((noinline)) int bl_flash_erase_need_lock_internal(uint32_t
+     );
+     XIP_SFlash_Opt_Exit();
+ 
+-    return 0;
++    return result == SUCCESS ? 0 : -1;
+ }
+ 
+ ATTR_TCM_SECTION
+ static __attribute__((noinline)) int bl_flash_write_need_lock_internal(uint32_t addr, uint8_t *src, int len)
+ {
++    BL_Err_Type result;
++
+     XIP_SFlash_Opt_Enter();
+-    RomDriver_XIP_SFlash_Write_Need_Lock(
++    result = RomDriver_XIP_SFlash_Write_Need_Lock(
+             &boot2_flashCfg.flashCfg,
+             boot2_flashCfg.flashCfg.ioMode&0xf,
+             addr,
+@@ -226,14 +238,16 @@ static __attribute__((noinline)) int bl_flash_write_need_lock_internal(uint32_t
+     );
+     XIP_SFlash_Opt_Exit();
+ 
+-    return 0;
++    return result == SUCCESS ? 0 : -1;
+ }
+ 
+ ATTR_TCM_SECTION
+ static __attribute__((noinline)) int bl_flash_read_need_lock_internal(uint32_t addr, uint8_t *dst, int len)
+ {
++    BL_Err_Type result;
++
+     XIP_SFlash_Opt_Enter();
+-    RomDriver_XIP_SFlash_Read_Need_Lock(
++    result = RomDriver_XIP_SFlash_Read_Need_Lock(
+             &boot2_flashCfg.flashCfg,
+             boot2_flashCfg.flashCfg.ioMode&0xf,
+             addr,
+@@ -242,7 +256,7 @@ static __attribute__((noinline)) int bl_flash_read_need_lock_internal(uint32_t a
+     );
+     XIP_SFlash_Opt_Exit();
+ 
+-    return 0;
++    return result == SUCCESS ? 0 : -1;
+ }
+ 
+ #ifdef CFG_USE_PSRAM
+@@ -376,6 +390,18 @@ int bl_flash_fw_protect_set(uint8_t en, uint32_t fw_addr, uint32_t fw_size, uint
      return 0;
  }
  
-+void bl_flash_fw_protect_allow_region(uint32_t addr, uint32_t size)
++int bl_flash_fw_protect_allow_region(uint32_t addr, uint32_t size)
 +{
++    /* Only a complete, aligned data partition beyond the firmware may be writable. */
++    if (!fw_protect_en || !flash_size || !size || (addr & 0xFFF) || (size & 0xFFF) ||
++        addr < fw_end_addr || addr < pt_end_addr || addr > flash_size || size > flash_size - addr) {
++        return -1;
++    }
 +    allowed_start_addr = addr;
 +    allowed_end_addr = addr + size;
++    return 0;
 +}
 +
  uint32_t bl_flash_get_size(void)
  {
      return flash_size;
 diff --git a/platform/hosal/bl702_hal/bl_flash.h b/platform/hosal/bl702_hal/bl_flash.h
-index adbac89..8366323 100644
+index adbac89..6acbe51 100644
 --- a/platform/hosal/bl702_hal/bl_flash.h
 +++ b/platform/hosal/bl702_hal/bl_flash.h
 @@ -39,6 +39,7 @@ int bl_flash_write_need_lock(uint32_t addr, uint8_t *src, int len);
  int bl_flash_read_need_lock(uint32_t addr, uint8_t *dst, int len);
  int bl_flash_config_update(void);
  int bl_flash_fw_protect_set(uint8_t en, uint32_t fw_addr, uint32_t fw_size, uint32_t pt_addr, uint32_t pt_size);
-+void bl_flash_fw_protect_allow_region(uint32_t addr, uint32_t size);
++int bl_flash_fw_protect_allow_region(uint32_t addr, uint32_t size);
  uint32_t bl_flash_get_size(void);
  void* bl_flash_get_flashCfg(void);
  
 diff --git a/stage/littlefs/port/lfs_xip_flash.c b/stage/littlefs/port/lfs_xip_flash.c
-index 2835b2a..2b68465 100644
+index 2835b2a..1fc0cab 100644
 --- a/stage/littlefs/port/lfs_xip_flash.c
 +++ b/stage/littlefs/port/lfs_xip_flash.c
-@@ -106,6 +106,7 @@ lfs_t *lfs_xip_init(void)
+@@ -1,5 +1,6 @@
+ #include <assert.h>
+ #include <errno.h>
++#include <stdio.h>
+ 
+ #include "lfs.h"
+ 
+@@ -79,6 +80,29 @@ static struct lfs_config cfg = {
+     .block_cycles = LITTLEFS_FLASH_BLOCK_CYCLE,
+ };
+ 
++/* Formatting is safe only on an entirely erased partition, never on corruption. */
++static int lfs_xip_partition_is_blank(void)
++{
++    uint8_t data[256];
++    lfs_block_t block;
++    lfs_off_t off;
++    unsigned int i;
++
++    for (block = 0; block < cfg.block_count; block++) {
++        for (off = 0; off < cfg.block_size; off += sizeof(data)) {
++            if (lfs_xip_flash_read(&cfg, block, off, data, sizeof(data)) != LFS_ERR_OK) {
++                return -1;
++            }
++            for (i = 0; i < sizeof(data); i++) {
++                if (data[i] != 0xFF) {
++                    return 0;
++                }
++            }
++        }
++    }
++    return 1;
++}
++
+ lfs_t *lfs_xip_init(void)
+ {
+     int ret;
+@@ -99,14 +123,31 @@ lfs_t *lfs_xip_init(void)
+     }
+ 
+     memset(&info, 0, sizeof(info));
+-    bl_mtd_info(handle, &info);
++    ret = bl_mtd_info(handle, &info);
++    if (ret != 0 || info.size < 2 * LITTLEFS_FLASH_BLOCK_SIZE ||
++        (info.offset & (LITTLEFS_FLASH_BLOCK_SIZE - 1)) ||
++        (info.size & (LITTLEFS_FLASH_BLOCK_SIZE - 1)) ||
++#if defined(BL702)
++        /* This firmware uses the checked-in 1 MiB partition layout. */
++        info.offset != 0xE4000 || info.size != 0x10000 ||
++#endif
++        bl_flash_fw_protect_allow_region(info.offset, info.size) != 0) {
++        printf("[LFS] Invalid PSM partition: info=%d offset=0x%08lx size=0x%08lx\r\n",
++               ret, (unsigned long)info.offset, (unsigned long)info.size);
++        bl_mtd_close(handle);
++        errno = LFS_ERR_IO;
++        return NULL;
++    }
+     LOG_I("Found valid PSM partition, XIP addr %08x, flash addr %08x, size %d\r\n",
+           info.xip_addr,
+           info.offset,
            info.size);
      lfs_xip_ctx.flash_addr = info.offset;
      cfg.block_count = info.size / LITTLEFS_FLASH_BLOCK_SIZE;
-+    bl_flash_fw_protect_allow_region(info.offset, info.size);
-     bl_mtd_close(handle);
+-    bl_mtd_close(handle);
++    if (bl_mtd_close(handle) != 0) {
++        errno = LFS_ERR_IO;
++        return NULL;
++    }
  #else
      lfs_xip_ctx.flash_addr = CONFIG_LITTLEFS_FLASH_ADDRESS;
-@@ -238,8 +239,16 @@ int lfs_xip_flash_prog(const struct lfs_config *c, lfs_block_t block,
+     cfg.block_count = LITTLEFS_FLASH_SIZE / LITTLEFS_FLASH_BLOCK_SIZE;
+@@ -118,14 +159,24 @@ lfs_t *lfs_xip_init(void)
+ #else
+     lfs_xip_ctx.fs_giant_lock = xSemaphoreCreateMutex();
+ #endif
++    if (lfs_xip_ctx.fs_giant_lock == NULL) {
++        errno = LFS_ERR_NOMEM;
++        return NULL;
++    }
+ #endif
+ 
+     // mount the filesystem
+     ret = lfs_mount(&lfs, &cfg);
+ 
+-    // reformat if we can't mount the filesystem
+-    // this should only happen on the first boot
++    // Reformat only on a blank, freshly erased PSM. Preserve corrupt data for
++    // diagnosis or an explicit D27 factory reset.
+     if (ret == LFS_ERR_CORRUPT || ret == LFS_ERR_INVAL) {
++        int blank = lfs_xip_partition_is_blank();
++        if (blank != 1) {
++            printf("[LFS] PSM mount failed (%d), blank=%d; refusing automatic format\r\n", ret, blank);
++            errno = blank < 0 ? LFS_ERR_IO : ret;
++            return NULL;
++        }
+         LOG_W("try to reformat \r\n");
+         ret = lfs_format(&lfs, &cfg);
+         if (ret) {
+@@ -238,8 +289,16 @@ int lfs_xip_flash_prog(const struct lfs_config *c, lfs_block_t block,
      return ret;
  #else
      struct lfs_context *ctx = c->context;
@@ -116,7 +725,7 @@ index 2835b2a..2b68465 100644
  #endif
  }
  
-@@ -274,8 +283,15 @@ int lfs_xip_flash_erase(const struct lfs_config *c, lfs_block_t block)
+@@ -274,8 +333,15 @@ int lfs_xip_flash_erase(const struct lfs_config *c, lfs_block_t block)
      return ret;
  #else
      struct lfs_context *ctx = c->context;

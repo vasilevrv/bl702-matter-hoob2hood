@@ -8,7 +8,8 @@ This firmware turns an XT-ZB2 module into a Matter over Thread device for contro
 - endpoint 1: Matter Fan Control with speeds 0-4;
 - endpoint 2: Matter On/Off for the light;
 - UART1 TX on D23 and RX on D25, 1200 baud, 8N1;
-- debounced button on D27: a short press cycles through operating modes, while a five-second hold performs a factory reset;
+- debounced button on D27: the first short press synchronizes to all-off, rapid follow-up presses select a mode, and a five-second hold performs a factory reset;
+- fan and light state are kept in RAM only and start in the off state after every reboot;
 - product name `Hob2Hood`, manufacturer `Salu Workshop`, and hardware version `BL702`.
 
 UART commands:
@@ -23,13 +24,13 @@ UART commands:
 | Light on | `L` |
 | Light off | `l` |
 
-Short presses of D27 cycle through these states:
+After at least five seconds without a button press, the next short press always sends `X` and turns everything off. Further presses made within five seconds cycle through these states:
 
 ```text
 light -> light + speed 1 -> light + speed 2 -> light + speed 3 -> all off
 ```
 
-The mode changes after the button is released. A long press does not send a normal command; after five seconds it starts a Matter factory reset.
+Every short press restarts the five-second window. When the window expires, the following press again turns everything off instead of relying on the last state known to this module. The mode changes after the button is released. A long press does not send a normal command; after five seconds it starts a Matter factory reset.
 
 ## Supported build hosts
 
@@ -58,6 +59,8 @@ cd hob2hood-matter
 ```
 
 The first build downloads the pinned Matter and Bouffalo SDK revisions together with the required submodules. This takes some time and several gigabytes of disk space. Subsequent builds reuse the `deps/` directory.
+
+The build also checks the linked firmware: OpenThread must use the continuous 64-bit BL702 clock, the Thread task must feed its watchdog heartbeat, and the image must fit the 1 MiB flash layout. A build that fails any of these checks must not be flashed.
 
 The resulting firmware is written to:
 
@@ -91,10 +94,12 @@ BAUD=115200 ./scripts/flash.sh /dev/ttyUSB0
 
 The script always uses:
 
-- the 2 MiB flash layout from `config/partition_cfg_2M.toml`;
+- the 1 MiB flash layout from `config/partition_cfg_1M.toml`;
 - the `32M` crystal setting;
 - the standard Bouffalo boot2 `v6.4-rc6`;
 - no Device Tree image.
+
+The 1 MiB partition layout places Matter/Thread settings in a different PSM region from the old 2 MiB layout. After switching layouts, expect to commission the device again; flashing the new image alone does not preserve the old pairing data.
 
 After flashing succeeds, take the module out of boot mode and reboot it. The debug UART runs at 115200 baud, 8N1.
 
@@ -106,7 +111,9 @@ A working Matter integration, a Thread Border Router, and current Thread credent
 2. Enter the manual setup code `34970112332` or scan the QR code printed in the boot log.
 3. After commissioning, the device appears as `Hob2Hood`.
 
-If the device has already been commissioned or was removed from Home Assistant, perform a factory reset first: with the module running normally, connect D27 to GND and hold it for five seconds. A reset after three quick power cycles is also implemented, but using D27 is more reliable.
+If the device has already been commissioned or was removed from Home Assistant, perform a factory reset first: connect D27 to GND and hold it for five seconds. This works both during normal operation and when D27 is already held while the module boots. Power cycling never triggers a factory reset.
+
+If a nonblank PSM filesystem is damaged, the firmware deliberately does not erase Matter/Thread credentials automatically. The serial log reports a refused format. Hold D27 to GND for five seconds while powering on to erase PSM and start pairing again; this intentionally removes the old credentials.
 
 ## Connecting the hood controller
 

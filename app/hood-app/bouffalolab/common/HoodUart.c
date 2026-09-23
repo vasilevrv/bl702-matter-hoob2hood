@@ -3,12 +3,14 @@
 #include <bl702_glb.h>
 #include <bl702_hbn.h>
 #include <bl702_uart.h>
+#include <bl_timer.h>
 #include <hosal_uart.h>
 
 #define HOOD_UART_ID 1U
 #define HOOD_UART_TX_PIN 23U
 #define HOOD_UART_RX_PIN 25U
 #define HOOD_UART_BAUD_RATE 1200U
+#define HOOD_UART_IDLE_TIMEOUT_US 100000U
 
 /*
  * UART0 and UART1 use one shared clock.  HOSAL selects the 144 MHz FCLK,
@@ -25,19 +27,20 @@
 #endif
 
 static hosal_uart_dev_t sHoodUart = {
-    .config = {
-        .uart_id = HOOD_UART_ID,
-        .tx_pin = HOOD_UART_TX_PIN,
-        .rx_pin = HOOD_UART_RX_PIN,
-        .cts_pin = 255,
-        .rts_pin = 255,
-        .baud_rate = HOOD_UART_BAUD_RATE,
-        .data_width = HOSAL_DATA_WIDTH_8BIT,
-        .parity = HOSAL_NO_PARITY,
-        .stop_bits = HOSAL_STOP_BITS_1,
-        .flow_control = HOSAL_FLOW_CONTROL_DISABLED,
-        .mode = HOSAL_UART_MODE_POLL,
-    },
+    .config =
+        {
+            .uart_id = HOOD_UART_ID,
+            .tx_pin = HOOD_UART_TX_PIN,
+            .rx_pin = HOOD_UART_RX_PIN,
+            .cts_pin = 255,
+            .rts_pin = 255,
+            .baud_rate = HOOD_UART_BAUD_RATE,
+            .data_width = HOSAL_DATA_WIDTH_8BIT,
+            .parity = HOSAL_NO_PARITY,
+            .stop_bits = HOSAL_STOP_BITS_1,
+            .flow_control = HOSAL_FLOW_CONTROL_DISABLED,
+            .mode = HOSAL_UART_MODE_POLL,
+        },
 };
 
 static void configure_uart(UART_ID_Type uartId, uint32_t baudRate)
@@ -72,8 +75,14 @@ int hood_uart_init(void)
     }
 
     /* Finish any pending console character before changing the shared clock. */
+    const uint64_t waitStartedAt = bl_timer_now_us64();
     while (UART_GetTxBusBusyStatus(UART0_ID) == SET)
-    {}
+    {
+        if ((bl_timer_now_us64() - waitStartedAt) >= HOOD_UART_IDLE_TIMEOUT_US)
+        {
+            return -1;
+        }
+    }
 
     UART_Disable(UART0_ID, UART_TXRX);
     UART_Disable(UART1_ID, UART_TXRX);
@@ -90,5 +99,6 @@ int hood_uart_init(void)
 
 int hood_uart_write(uint8_t byte)
 {
-    return hosal_uart_send(&sHoodUart, &byte, 1U) == 1 ? 0 : -1;
+    /* Unlike the HOSAL polling path, UART_SendData has a finite FIFO timeout. */
+    return UART_SendData(UART1_ID, &byte, 1U) == SUCCESS ? 0 : -1;
 }

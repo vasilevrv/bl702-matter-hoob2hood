@@ -23,5 +23,5 @@ jobs:
           gh release upload "${RELEASE_TAG}" \
             out/hob2hood/chip-bl702-hood-example.bin \
             out/hob2hood/chip-bl702-hood-example.out.map \
-            config/partition_cfg_2M.toml \
+            config/partition_cfg_1M.toml \
             --clobber

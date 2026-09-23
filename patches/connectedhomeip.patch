@@ -1,5 +1,191 @@
+diff --git a/examples/platform/bouffalolab/common/iot_sdk/platform_port.cpp b/examples/platform/bouffalolab/common/iot_sdk/platform_port.cpp
+index 485c63f7ee..59c975133e 100644
+--- a/examples/platform/bouffalolab/common/iot_sdk/platform_port.cpp
++++ b/examples/platform/bouffalolab/common/iot_sdk/platform_port.cpp
+@@ -47,6 +47,7 @@ extern "C" {
+ #include <bl_rtc.h>
+ #include <bl_sec.h>
+ #include <bl_sys.h>
++#include <bl_wdt.h>
+ #include <hal_board.h>
+ #include <hal_boot2.h>
+ #if CHIP_DEVICE_LAYER_TARGET_BL602
+@@ -63,6 +64,8 @@ extern "C" {
+ #include "mboard.h"
+ #include <plat.h>
+ 
++extern "C" bool app_watchdog_is_healthy(void);
++
+ HOSAL_UART_DEV_DECL(uart_stdio, CHIP_UART_PORT, CHIP_UART_PIN_TX, CHIP_UART_PIN_RX, CHIP_UART_BAUDRATE);
+ 
+ #ifdef SYS_AOS_LOOP_ENABLE
+@@ -82,24 +85,21 @@ extern "C" unsigned int sleep(unsigned int seconds)
+ extern "C" void vApplicationStackOverflowHook(TaskHandle_t xTask, char * pcTaskName)
+ {
+     printf("Stack Overflow checked. Stack name %s", pcTaskName);
+-    while (true)
+-    {
+-        /*empty here*/
+-    }
++    bl_sys_reset_por();
+ }
+ 
+ extern "C" void vApplicationMallocFailedHook(void)
+ {
+     printf("Memory Allocate Failed. Current left size is %d bytes", xPortGetFreeHeapSize());
+-    while (true)
+-    {
+-        /*empty here*/
+-    }
++    bl_sys_reset_por();
+ }
+ 
+ extern "C" void vApplicationIdleHook(void)
+ {
+-    //    bl_wdt_feed();
++    if (app_watchdog_is_healthy())
++    {
++        bl_wdt_feed();
++    }
+     __asm volatile("   wfi     ");
+ }
+ 
+@@ -118,46 +118,28 @@ extern "C" __WEAK void vApplicationSleep(TickType_t xExpectedIdleTime) {}
+ #endif
+ 
+ static StaticTask_t xIdleTaskTCB;
++static StackType_t xIdleTaskStack[configMINIMAL_STACK_SIZE];
++static StaticTask_t xTimerTaskTCB;
++static StackType_t xTimerTaskStack[configTIMER_TASK_STACK_DEPTH];
+ extern "C" void vApplicationGetIdleTaskMemory(StaticTask_t ** ppxIdleTaskTCBBuffer, StackType_t ** ppxIdleTaskStackBuffer,
+                                               uint32_t * pulIdleTaskStackSize)
+ {
+-    /* If the buffers to be provided to the Idle task are declared inside this
+-    function then they must be declared static - otherwise they will be allocated on
+-    the stack and so not exists after this function exits. */
+-
+-    /* Pass out a pointer to the StaticTask_t structure in which the Idle task's
+-    state will be stored. */
+-    *ppxIdleTaskTCBBuffer = (StaticTask_t *) pvPortMalloc(sizeof(StaticTask_t));
++    /* The buffers are static so Idle task creation does not consume heap. */
++    *ppxIdleTaskTCBBuffer = &xIdleTaskTCB;
+ 
+-    /* Pass out the array that will be used as the Idle task's stack. */
+-    *ppxIdleTaskStackBuffer = (StackType_t *) pvPortMalloc(sizeof(StackType_t) * configMINIMAL_STACK_SIZE);
++    *ppxIdleTaskStackBuffer = xIdleTaskStack;
+ 
+-    /* Pass out the size of the array pointed to by *ppxIdleTaskStackBuffer.
+-    Note that, as the array is necessarily of type StackType_t,
+-    configMINIMAL_STACK_SIZE is specified in words, not bytes. */
+     *pulIdleTaskStackSize = configMINIMAL_STACK_SIZE;
+ }
+ 
+-/* configSUPPORT_STATIC_ALLOCATION and configUSE_TIMERS are both set to 1, so the
+-application must provide an implementation of vApplicationGetTimerTaskMemory()
+-to provide the memory that is used by the Timer service task. */
+ extern "C" void vApplicationGetTimerTaskMemory(StaticTask_t ** ppxTimerTaskTCBBuffer, StackType_t ** ppxTimerTaskStackBuffer,
+                                                uint32_t * pulTimerTaskStackSize)
+ {
+-    /* If the buffers to be provided to the Timer task are declared inside this
+-    function then they must be declared static - otherwise they will be allocated on
+-    the stack and so not exists after this function exits. */
+-
+-    /* Pass out a pointer to the StaticTask_t structure in which the Timer
+-    task's state will be stored. */
+-    *ppxTimerTaskTCBBuffer = (StaticTask_t *) pvPortMalloc(sizeof(StaticTask_t));
++    /* The buffers are static so Timer task creation does not consume heap. */
++    *ppxTimerTaskTCBBuffer = &xTimerTaskTCB;
+ 
+-    /* Pass out the array that will be used as the Timer task's stack. */
+-    *ppxTimerTaskStackBuffer = (StackType_t *) pvPortMalloc(sizeof(StackType_t) * configTIMER_TASK_STACK_DEPTH);
++    *ppxTimerTaskStackBuffer = xTimerTaskStack;
+ 
+-    /* Pass out the size of the array pointed to by *ppxTimerTaskStackBuffer.
+-    Note that, as the array is necessarily of type StackType_t,
+-    configTIMER_TASK_STACK_DEPTH is specified in words, not bytes. */
+     *pulTimerTaskStackSize = configTIMER_TASK_STACK_DEPTH;
+ }
+ 
+@@ -165,8 +147,6 @@ extern "C" void vAssertCalled(void)
+ {
+     void * ra = (void *) __builtin_return_address(0);
+ 
+-    taskDISABLE_INTERRUPTS();
+-
+     if (xPortIsInsideInterrupt())
+     {
+         printf("vAssertCalled, ra = %p in ISR\r\n", (void *) ra);
+@@ -176,10 +156,7 @@ extern "C" void vAssertCalled(void)
+         printf("vAssertCalled, ra = %p in task %s\r\n", (void *) ra, pcTaskGetName(NULL));
+     }
+ 
+-    portABORT();
+-
+-    while (true)
+-        ;
++    bl_sys_reset_por();
+ }
+ 
+ extern "C" void user_vAssertCalled(void) __attribute__((weak, alias("vAssertCalled")));
+diff --git a/examples/platform/bouffalolab/common/plat/main.cpp b/examples/platform/bouffalolab/common/plat/main.cpp
+index a1ad33b6fb..1de977328f 100644
+--- a/examples/platform/bouffalolab/common/plat/main.cpp
++++ b/examples/platform/bouffalolab/common/plat/main.cpp
+@@ -22,6 +22,14 @@
+ 
+ #include <plat.h>
+ 
++extern "C" {
++#include <bl_gpio.h>
++#include <bl_sys.h>
++#include <bl_wdt.h>
++}
++
++extern "C" bool app_watchdog_is_healthy(void);
++
+ using namespace ::chip;
+ using namespace ::chip::Inet;
+ using namespace ::chip::DeviceLayer;
+@@ -38,9 +46,7 @@ volatile int apperror_cnt;
+ void appError(int err)
+ {
+     ChipLogProgress(NotSpecified, "!!!!!!!!!!!! App Critical Error: %d !!!!!!!!!!!", err);
+-    portDISABLE_INTERRUPTS();
+-    while (true)
+-        ;
++    bl_sys_reset_por();
+ }
+ 
+ void appError(CHIP_ERROR error)
+@@ -52,6 +58,26 @@ extern "C" int START_ENTRY(void)
+ {
+     platform_port_init();
+ 
++    if (bl_wdt_init(60000) != 0)
++    {
++        ChipLogError(NotSpecified, "Failed to start the 60-second watchdog");
++    }
++
++    bl_gpio_enable_input(APP_FACTORY_RESET_PIN, 1, 0);
++    if (FactoryResetButtonHeldAtBoot())
++    {
++        puts("D27 held during boot: erasing Matter and Thread storage\r\n");
++        if (Internal::BflbConfig::FactoryResetRaw() == CHIP_NO_ERROR)
++        {
++            puts("Early factory reset complete; restarting\r\n");
++            bl_sys_reset_por();
++        }
++        else
++        {
++            puts("Early factory reset failed; continuing without reboot\r\n");
++        }
++    }
++
+     Internal::BflbConfig::Init();
+ 
+     ChipLogProgress(NotSpecified, "==================================================");
 diff --git a/examples/platform/bouffalolab/common/plat/platform.cpp b/examples/platform/bouffalolab/common/plat/platform.cpp
-index a5052f72..b7d6f1a5 100644
+index a5052f727c..b7d6f1a546 100644
 --- a/examples/platform/bouffalolab/common/plat/platform.cpp
 +++ b/examples/platform/bouffalolab/common/plat/platform.cpp
 @@ -16,7 +16,12 @@
@@ -50,7 +236,7 @@ index 0289e0117f..ba112afedc 100644
  colorama
  coloredlogs
 diff --git a/src/app/clusters/network-commissioning/ThreadScanResponse.cpp b/src/app/clusters/network-commissioning/ThreadScanResponse.cpp
-index 8890e4a4..bf8076a6 100644
+index 8890e4a4d7..bf8076a6a9 100644
 --- a/src/app/clusters/network-commissioning/ThreadScanResponse.cpp
 +++ b/src/app/clusters/network-commissioning/ThreadScanResponse.cpp
 @@ -21,6 +21,8 @@
@@ -103,11 +289,183 @@ index 8890e4a4..bf8076a6 100644
      Span<ThreadScanResponse> responseSpan;
  
      ReturnErrorOnFailure(LoadResponses(mNetworks, responseArray, responseSpan));
+diff --git a/src/platform/bouffalolab/common/BflbConfig.h b/src/platform/bouffalolab/common/BflbConfig.h
+index e74ec7f2b2..616690b0c4 100644
+--- a/src/platform/bouffalolab/common/BflbConfig.h
++++ b/src/platform/bouffalolab/common/BflbConfig.h
+@@ -78,6 +78,7 @@ public:
+     static constexpr char kBLKey_factoryResetFlag[] = ("__factory_reset_pending");
+ 
+     static void Init(void);
++    static CHIP_ERROR FactoryResetRaw(void);
+ 
+     // Config value accessors.
+     static CHIP_ERROR ReadConfigValue(const char * key, uint8_t * val, size_t size, size_t & readsize);
 diff --git a/src/platform/bouffalolab/common/BflbConfig_littlefs.cpp b/src/platform/bouffalolab/common/BflbConfig_littlefs.cpp
-index dec1c06f..e5166586 100644
+index dec1c06f4e..27097e70a6 100644
 --- a/src/platform/bouffalolab/common/BflbConfig_littlefs.cpp
 +++ b/src/platform/bouffalolab/common/BflbConfig_littlefs.cpp
-@@ -194,6 +194,7 @@ CHIP_ERROR BflbConfig::ReadConfigValue(const char * key, uint8_t * val, size_t s
+@@ -17,9 +17,13 @@
+ 
+ #include <lfs.h>
+ extern "C" {
++#include <bl_flash.h>
++#include <bl_mtd.h>
+ #include <lfs_port.h>
+ }
+ 
++#include <stdio.h>
++
+ #include <platform/internal/CHIPDeviceLayerInternal.h>
+ 
+ #include <platform/bouffalolab/common/BflbConfig.h>
+@@ -88,11 +92,12 @@ static inline char * blcfg_convert_key(const char * pKey, const char * pNameSpac
+ 
+ static CHIP_ERROR blcfg_do_factory_reset(void)
+ {
+-    CHIP_ERROR err = CHIP_NO_ERROR;
+-    int ret;
+-    struct lfs_info stat;
+-    lfs_file_t file;
+-    lfs_dir_t dir            = {};
++    CHIP_ERROR err              = CHIP_NO_ERROR;
++    int ret                     = LFS_ERR_OK;
++    struct lfs_info stat        = {};
++    lfs_file_t file             = {};
++    lfs_dir_t dir               = {};
++    bool dirOpen                = false;
+     char * factory_reset_key = blcfg_convert_key(BflbConfig::kBLKey_factoryResetFlag);
+ 
+     VerifyOrExit(factory_reset_key != nullptr, err = CHIP_ERROR_NO_MEMORY);
+@@ -100,57 +105,47 @@ static CHIP_ERROR blcfg_do_factory_reset(void)
+     BflbConfig_lfs->cfg->lock(BflbConfig_lfs->cfg);
+ 
+     ret = lfs_stat(BflbConfig_lfs, factory_reset_key, &stat);
+-
+-    if (LFS_ERR_OK == ret)
++    if (ret == LFS_ERR_NOENT)
+     {
+-        err = CHIP_ERROR_PERSISTED_STORAGE_FAILED;
++        goto exit;
++    }
++    VerifyOrExit(ret == LFS_ERR_OK && stat.type == LFS_TYPE_REG, err = CHIP_ERROR_PERSISTED_STORAGE_FAILED);
+ 
+-        do
+-        {
+-            ret = lfs_file_open(BflbConfig_lfs, &file, factory_reset_key, LFS_O_RDONLY);
+-            VerifyOrExit(ret == LFS_ERR_OK, err = CHIP_ERROR_PERSISTED_STORAGE_FAILED);
+-            lfs_file_close(BflbConfig_lfs, &file);
++    ret = lfs_file_open(BflbConfig_lfs, &file, factory_reset_key, LFS_O_RDONLY);
++    VerifyOrExit(ret == LFS_ERR_OK, err = CHIP_ERROR_PERSISTED_STORAGE_FAILED);
++    ret = lfs_file_close(BflbConfig_lfs, &file);
++    VerifyOrExit(ret == LFS_ERR_OK, err = CHIP_ERROR_PERSISTED_STORAGE_FAILED);
+ 
+-            ret = lfs_dir_open(BflbConfig_lfs, &dir, BflbConfig_LFS_NAMESPACE);
+-            VerifyOrExit(ret == LFS_ERR_OK, err = CHIP_ERROR_PERSISTED_STORAGE_FAILED);
++    ret = lfs_dir_open(BflbConfig_lfs, &dir, BflbConfig_LFS_NAMESPACE);
++    VerifyOrExit(ret == LFS_ERR_OK, err = CHIP_ERROR_PERSISTED_STORAGE_FAILED);
++    dirOpen = true;
+ 
+-            while (1)
+-            {
+-                ret = lfs_dir_read(BflbConfig_lfs, &dir, &stat);
+-                if (ret <= 0)
+-                {
+-                    break;
+-                }
+-
+-                if (stat.type != LFS_TYPE_REG)
+-                {
+-                    continue;
+-                }
+-                char * delete_key = blcfg_convert_key(stat.name, BflbConfig_LFS_NAMESPACE);
+-                VerifyOrExit(delete_key != nullptr, err = CHIP_ERROR_NO_MEMORY);
+-
+-                ret = lfs_remove(BflbConfig_lfs, delete_key);
+-                free(delete_key);
+-
+-                if (ret != LFS_ERR_OK)
+-                {
+-                    break;
+-                }
+-            }
++    while ((ret = lfs_dir_read(BflbConfig_lfs, &dir, &stat)) > 0)
++    {
++        if (stat.type == LFS_TYPE_REG)
++        {
++            char * delete_key = blcfg_convert_key(stat.name, BflbConfig_LFS_NAMESPACE);
++            VerifyOrExit(delete_key != nullptr, err = CHIP_ERROR_NO_MEMORY);
+ 
+-            lfs_dir_close(BflbConfig_lfs, &dir);
++            ret = lfs_remove(BflbConfig_lfs, delete_key);
++            free(delete_key);
++            VerifyOrExit(ret == LFS_ERR_OK, err = CHIP_ERROR_PERSISTED_STORAGE_FAILED);
++        }
++    }
++    VerifyOrExit(ret == 0, err = CHIP_ERROR_PERSISTED_STORAGE_FAILED);
+ 
+-            ret = lfs_remove(BflbConfig_lfs, factory_reset_key);
+-            if (ret != LFS_ERR_OK)
+-            {
+-                break;
+-            }
++    ret = lfs_dir_close(BflbConfig_lfs, &dir);
++    dirOpen = false;
++    VerifyOrExit(ret == LFS_ERR_OK, err = CHIP_ERROR_PERSISTED_STORAGE_FAILED);
+ 
+-            err = CHIP_NO_ERROR;
+-        } while (0);
+-    }
++    ret = lfs_remove(BflbConfig_lfs, factory_reset_key);
++    VerifyOrExit(ret == LFS_ERR_OK || ret == LFS_ERR_NOENT, err = CHIP_ERROR_PERSISTED_STORAGE_FAILED);
+ 
+ exit:
++    if (dirOpen)
++    {
++        lfs_dir_close(BflbConfig_lfs, &dir);
++    }
+     BflbConfig_lfs->cfg->unlock(BflbConfig_lfs->cfg);
+     if (factory_reset_key)
+     {
+@@ -189,11 +184,45 @@ exit:
+     configASSERT(err == CHIP_NO_ERROR);
+ }
+ 
++CHIP_ERROR BflbConfig::FactoryResetRaw(void)
++{
++    constexpr uint32_t kExpectedPsmOffset = 0xE4000U;
++    constexpr uint32_t kExpectedPsmSize   = 0x10000U;
++    bl_mtd_handle_t handle = nullptr;
++    bl_mtd_info_t info      = {};
++
++    if (bl_mtd_open(BL_MTD_PARTITION_NAME_PSM, &handle, BL_MTD_OPEN_FLAG_BUSADDR) < 0 || handle == nullptr)
++    {
++        printf("[FACTORY_RESET] PSM open failed\r\n");
++        return CHIP_ERROR_PERSISTED_STORAGE_FAILED;
++    }
++
++    const int infoResult = bl_mtd_info(handle, &info);
++    const bool validPsm = infoResult == 0 && info.offset == kExpectedPsmOffset && info.size == kExpectedPsmSize &&
++        bl_flash_fw_protect_allow_region(info.offset, info.size) == 0;
++    if (validPsm)
++    {
++        printf("[FACTORY_RESET] PSM offset=0x%08lx size=0x%08lx\r\n",
++               static_cast<unsigned long>(info.offset), static_cast<unsigned long>(info.size));
++    }
++    else
++    {
++        printf("[FACTORY_RESET] Invalid PSM: info=%d offset=0x%08lx size=0x%08lx\r\n",
++               infoResult, static_cast<unsigned long>(info.offset), static_cast<unsigned long>(info.size));
++    }
++
++    const int eraseResult = validPsm ? bl_flash_erase(info.offset, static_cast<int>(info.size)) : -1;
++    const int closeResult = bl_mtd_close(handle);
++    printf("[FACTORY_RESET] erase=%d close=%d\r\n", eraseResult, closeResult);
++    return (eraseResult == 0 && closeResult == 0) ? CHIP_NO_ERROR : CHIP_ERROR_PERSISTED_STORAGE_FAILED;
++}
++
+ CHIP_ERROR BflbConfig::ReadConfigValue(const char * key, uint8_t * val, size_t size, size_t & readsize)
+ {
      CHIP_ERROR err = CHIP_NO_ERROR;
      int ret        = LFS_ERR_OK;
      lfs_file_t file;
@@ -115,7 +473,7 @@ index dec1c06f..e5166586 100644
      char * read_key = blcfg_convert_key(key, BflbConfig_LFS_NAMESPACE);
  
      VerifyOrExit(read_key != nullptr, err = CHIP_ERROR_NO_MEMORY);
-@@ -202,15 +203,23 @@ CHIP_ERROR BflbConfig::ReadConfigValue(const char * key, uint8_t * val, size_t s
+@@ -202,15 +231,23 @@ CHIP_ERROR BflbConfig::ReadConfigValue(const char * key, uint8_t * val, size_t s
  
      ret = lfs_file_open(BflbConfig_lfs, &file, read_key, LFS_O_RDONLY);
      VerifyOrExit(ret == LFS_ERR_OK, err = CHIP_DEVICE_ERROR_CONFIG_NOT_FOUND);
@@ -141,7 +499,33 @@ index dec1c06f..e5166586 100644
      BflbConfig_lfs->cfg->unlock(BflbConfig_lfs->cfg);
      if (read_key)
      {
-@@ -279,10 +288,26 @@ CHIP_ERROR BflbConfig::WriteConfigValue(const char * key, uint8_t * val, size_t
+@@ -223,19 +260,22 @@ exit:
+ CHIP_ERROR BflbConfig::ReadConfigValue(const char * key, bool & val)
+ {
+     size_t readlen = 0;
+-    return ReadConfigValue(key, (uint8_t *) &val, 1, readlen);
++    CHIP_ERROR err = ReadConfigValue(key, (uint8_t *) &val, sizeof(val), readlen);
++    return err == CHIP_NO_ERROR && readlen != sizeof(val) ? CHIP_ERROR_PERSISTED_STORAGE_FAILED : err;
+ }
+ 
+ CHIP_ERROR BflbConfig::ReadConfigValue(const char * key, uint32_t & val)
+ {
+     size_t readlen = 0;
+-    return ReadConfigValue(key, (uint8_t *) &val, sizeof(val), readlen);
++    CHIP_ERROR err = ReadConfigValue(key, (uint8_t *) &val, sizeof(val), readlen);
++    return err == CHIP_NO_ERROR && readlen != sizeof(val) ? CHIP_ERROR_PERSISTED_STORAGE_FAILED : err;
+ }
+ 
+ CHIP_ERROR BflbConfig::ReadConfigValue(const char * key, uint64_t & val)
+ {
+     size_t readlen = 0;
+-    return ReadConfigValue(key, (uint8_t *) &val, sizeof(val), readlen);
++    CHIP_ERROR err = ReadConfigValue(key, (uint8_t *) &val, sizeof(val), readlen);
++    return err == CHIP_NO_ERROR && readlen != sizeof(val) ? CHIP_ERROR_PERSISTED_STORAGE_FAILED : err;
+ }
+ 
+ CHIP_ERROR BflbConfig::ReadConfigValueStr(const char * key, char * buf, size_t bufSize, size_t & outLen)
+@@ -279,10 +319,26 @@ CHIP_ERROR BflbConfig::WriteConfigValue(const char * key, uint8_t * val, size_t
      BflbConfig_lfs->cfg->lock(BflbConfig_lfs->cfg);
  
      ret = lfs_file_open(BflbConfig_lfs, &file, write_key, LFS_O_CREAT | LFS_O_RDWR | LFS_O_TRUNC);
@@ -171,3 +555,208 @@ index dec1c06f..e5166586 100644
  
  exit:
      BflbConfig_lfs->cfg->unlock(BflbConfig_lfs->cfg);
+@@ -341,8 +397,10 @@ CHIP_ERROR BflbConfig::ClearConfigValue(const char * key)
+ 
+ CHIP_ERROR BflbConfig::FactoryResetConfig(void)
+ {
++    CHIP_ERROR err = CHIP_NO_ERROR;
+     int ret = LFS_ERR_OK;
+     lfs_file_t file;
++    bool fileOpen               = false;
+     char * reset_key             = blcfg_convert_key(kBLKey_factoryResetFlag);
+     const char reset_key_value[] = "pending";
+ 
+@@ -354,19 +412,25 @@ CHIP_ERROR BflbConfig::FactoryResetConfig(void)
+     BflbConfig_lfs->cfg->lock(BflbConfig_lfs->cfg);
+ 
+     ret = lfs_file_open(BflbConfig_lfs, &file, reset_key, LFS_O_CREAT | LFS_O_RDWR | LFS_O_TRUNC);
+-    if (ret != LFS_ERR_OK)
+-    {
+-        BflbConfig_lfs->cfg->unlock(BflbConfig_lfs->cfg);
+-        return CHIP_ERROR_PERSISTED_STORAGE_FAILED;
+-    }
++    VerifyOrExit(ret == LFS_ERR_OK, err = CHIP_ERROR_PERSISTED_STORAGE_FAILED);
++    fileOpen = true;
+ 
+-    lfs_file_write(BflbConfig_lfs, &file, reset_key_value, sizeof(reset_key_value));
+-    lfs_file_close(BflbConfig_lfs, &file);
++    ret = lfs_file_write(BflbConfig_lfs, &file, reset_key_value, sizeof(reset_key_value));
++    VerifyOrExit(ret == static_cast<int>(sizeof(reset_key_value)), err = CHIP_ERROR_PERSISTED_STORAGE_FAILED);
+ 
++    ret = lfs_file_close(BflbConfig_lfs, &file);
++    fileOpen = false;
++    VerifyOrExit(ret == LFS_ERR_OK, err = CHIP_ERROR_PERSISTED_STORAGE_FAILED);
++
++exit:
++    if (fileOpen)
++    {
++        lfs_file_close(BflbConfig_lfs, &file);
++    }
+     BflbConfig_lfs->cfg->unlock(BflbConfig_lfs->cfg);
+     free(reset_key);
+ 
+-    return blcfg_do_factory_reset();
++    return err == CHIP_NO_ERROR ? blcfg_do_factory_reset() : err;
+ }
+ 
+ void BflbConfig::RunConfigUnitTest() {}
+@@ -388,6 +452,7 @@ CHIP_ERROR BflbConfig::ReadKVS(const char * key, void * value, size_t value_size
+     CHIP_ERROR err = CHIP_NO_ERROR;
+     int ret        = LFS_ERR_OK;
+     lfs_file_t file;
++    bool fileOpen  = false;
+     char * read_key = blcfg_convert_key(key, BflbConfig_LFS_NAMESPACE);
+ 
+     VerifyOrExit(read_key != nullptr, err = CHIP_ERROR_NO_MEMORY);
+@@ -401,6 +466,7 @@ CHIP_ERROR BflbConfig::ReadKVS(const char * key, void * value, size_t value_size
+ 
+     ret = lfs_file_open(BflbConfig_lfs, &file, read_key, LFS_O_RDONLY);
+     VerifyOrExit(ret == LFS_ERR_OK, err = CHIP_DEVICE_ERROR_CONFIG_NOT_FOUND);
++    fileOpen = true;
+ 
+     if (value && value_size)
+     {
+@@ -413,15 +479,26 @@ CHIP_ERROR BflbConfig::ReadKVS(const char * key, void * value, size_t value_size
+                 break;
+             }
+             ret = lfs_file_read(BflbConfig_lfs, &file, value, value_size);
+-            if (ret > 0)
++            if (ret < LFS_ERR_OK)
+             {
+-                *read_bytes_size = ret;
++                err = CHIP_ERROR_PERSISTED_STORAGE_FAILED;
++                break;
++            }
++            if (read_bytes_size != nullptr)
++            {
++                *read_bytes_size = static_cast<size_t>(ret);
+             }
+         } while (0);
+     }
+ 
+-    lfs_file_close(BflbConfig_lfs, &file);
++    ret = lfs_file_close(BflbConfig_lfs, &file);
++    fileOpen = false;
++    VerifyOrExit(ret == LFS_ERR_OK, err = CHIP_ERROR_PERSISTED_STORAGE_FAILED);
+ exit:
++    if (fileOpen)
++    {
++        lfs_file_close(BflbConfig_lfs, &file);
++    }
+     BflbConfig_lfs->cfg->unlock(BflbConfig_lfs->cfg);
+     if (read_key)
+     {
+diff --git a/src/platform/bouffalolab/common/ConfigurationManagerImpl.cpp b/src/platform/bouffalolab/common/ConfigurationManagerImpl.cpp
+index e2575db800..a8e6883cc4 100644
+--- a/src/platform/bouffalolab/common/ConfigurationManagerImpl.cpp
++++ b/src/platform/bouffalolab/common/ConfigurationManagerImpl.cpp
+@@ -55,34 +55,7 @@ bool ConfigurationManagerImpl::IsFullyProvisioned()
+ }
+ CHIP_ERROR ConfigurationManagerImpl::Init()
+ {
+-    CHIP_ERROR err;
+-    uint32_t rebootCount = 0;
+-
+-    err = Internal::GenericConfigurationManagerImpl<BflbConfig>::Init();
+-    SuccessOrExit(err);
+-
+-    if (BflbConfig::ConfigValueExists(BflbConfig::kCounterKey_RebootCount))
+-    {
+-        err = GetRebootCount(rebootCount);
+-        SuccessOrExit(err);
+-    }
+-    else
+-    {
+-        rebootCount = 0;
+-    }
+-    err = StoreRebootCount(rebootCount + 1);
+-    SuccessOrExit(err);
+-
+-    if (!BflbConfig::ConfigValueExists(BflbConfig::kCounterKey_TotalOperationalHours))
+-    {
+-        err = StoreTotalOperationalHours(0);
+-        SuccessOrExit(err);
+-    }
+-
+-    err = CHIP_NO_ERROR;
+-
+-exit:
+-    return err;
++    return Internal::GenericConfigurationManagerImpl<BflbConfig>::Init();
+ }
+ 
+ bool ConfigurationManagerImpl::CanFactoryReset()
+@@ -103,7 +76,8 @@ CHIP_ERROR ConfigurationManagerImpl::GetRebootCount(uint32_t & rebootCount)
+ 
+ CHIP_ERROR ConfigurationManagerImpl::StoreRebootCount(uint32_t rebootCount)
+ {
+-    return BflbConfig::WriteConfigValue(BflbConfig::kCounterKey_RebootCount, rebootCount);
++    (void) rebootCount;
++    return CHIP_NO_ERROR;
+ }
+ 
+ CHIP_ERROR ConfigurationManagerImpl::GetTotalOperationalHours(uint32_t & totalOperationalHours)
+@@ -113,7 +87,8 @@ CHIP_ERROR ConfigurationManagerImpl::GetTotalOperationalHours(uint32_t & totalOp
+ 
+ CHIP_ERROR ConfigurationManagerImpl::StoreTotalOperationalHours(uint32_t totalOperationalHours)
+ {
+-    return WriteConfigValue(BflbConfig::kCounterKey_TotalOperationalHours, totalOperationalHours);
++    (void) totalOperationalHours;
++    return CHIP_NO_ERROR;
+ }
+ 
+ CHIP_ERROR ConfigurationManagerImpl::ReadPersistedStorageValue(::chip::Platform::PersistedStorage::Key key, uint32_t & value)
+diff --git a/src/platform/bouffalolab/common/PlatformManagerImpl.cpp b/src/platform/bouffalolab/common/PlatformManagerImpl.cpp
+index 7dd50787da..1c5d6857b7 100644
+--- a/src/platform/bouffalolab/common/PlatformManagerImpl.cpp
++++ b/src/platform/bouffalolab/common/PlatformManagerImpl.cpp
+@@ -27,26 +27,6 @@ PlatformManagerImpl PlatformManagerImpl::sInstance;
+ 
+ void PlatformManagerImpl::_Shutdown()
+ {
+-    uint64_t upTime = 0;
+-
+-    if (GetDiagnosticDataProvider().GetUpTime(upTime) == CHIP_NO_ERROR)
+-    {
+-        uint32_t totalOperationalHours = 0;
+-
+-        if (ConfigurationMgr().GetTotalOperationalHours(totalOperationalHours) == CHIP_NO_ERROR)
+-        {
+-            ConfigurationMgr().StoreTotalOperationalHours(totalOperationalHours + static_cast<uint32_t>(upTime / 3600));
+-        }
+-        else
+-        {
+-            ChipLogError(DeviceLayer, "Failed to get total operational hours of the Node");
+-        }
+-    }
+-    else
+-    {
+-        ChipLogError(DeviceLayer, "Failed to get current uptime since the Node’s last reboot");
+-    }
+-
+     Internal::GenericPlatformManagerImpl_FreeRTOS<PlatformManagerImpl>::_Shutdown();
+ }
+ 
+diff --git a/src/platform/bouffalolab/common/ThreadStackManagerImpl.cpp b/src/platform/bouffalolab/common/ThreadStackManagerImpl.cpp
+index 1f5e2b030b..77295b7eff 100644
+--- a/src/platform/bouffalolab/common/ThreadStackManagerImpl.cpp
++++ b/src/platform/bouffalolab/common/ThreadStackManagerImpl.cpp
+@@ -172,6 +172,7 @@ void ThreadStackManagerImpl::FactoryResetThreadStack(void)
+ using namespace ::chip::DeviceLayer;
+ 
+ extern "C" ot_system_event_t otrGetNotifyEvent(void);
++extern "C" void ot_watchdog_heartbeat(void);
+ 
+ ot_system_event_t ot_system_event_var = OT_SYSTEM_EVENT_NONE;
+ 
+@@ -184,6 +185,10 @@ void otSysProcessDrivers(otInstance * aInstance)
+         ot_alarmTask(sevent);
+         ot_radioTask(sevent);
+     }
++
++    // This function runs on the actual Matter/OpenThread task after it has
++    // processed tasklets. The application wakes it periodically for liveness.
++    ot_watchdog_heartbeat();
+ }
+ 
+ extern "C" void otTaskletsSignalPending(otInstance * p_instance)

@@ -4,7 +4,7 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SDK_ROOT="${PROJECT_ROOT}/deps/bl_iot_sdk"
 FIRMWARE="${PROJECT_ROOT}/out/hob2hood/chip-bl702-hood-example.bin"
-PARTITION_TABLE="${PROJECT_ROOT}/config/partition_cfg_2M.toml"
+PARTITION_TABLE="${PROJECT_ROOT}/config/partition_cfg_1M.toml"
 BOOT2="${SDK_ROOT}/tools/flash_tool/chips/bl702/builtin_imgs/boot2_isp_bl702_v6.4_rc6/boot2_isp_release.bin"
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
@@ -45,7 +45,7 @@ for file in "${FLASH_TOOL}" "${FIRMWARE}" "${PARTITION_TABLE}" "${BOOT2}"; do
 done
 
 FIRMWARE_SIZE="$(wc -c < "${FIRMWARE}" | tr -d ' ')"
-FIRMWARE_LIMIT=$((0x126000))
+FIRMWARE_LIMIT=$((0xE0000))
 if (( FIRMWARE_SIZE > FIRMWARE_LIMIT )); then
     echo "error: firmware is ${FIRMWARE_SIZE} bytes, larger than the FW partition (${FIRMWARE_LIMIT} bytes)" >&2
     exit 1

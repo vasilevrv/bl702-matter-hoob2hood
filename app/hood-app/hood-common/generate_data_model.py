@@ -88,15 +88,17 @@ def main() -> None:
         attribute for attribute in fan_cluster["attributes"] if attribute["name"] in wanted_fan_attributes
     ]
     fan_cluster["commands"] = []
-    set_attribute(fan_cluster, "FanMode", "0", "NVM")
+    set_attribute(fan_cluster, "FanMode", "0")
     set_attribute(fan_cluster, "FanModeSequence", "0")
-    set_attribute(fan_cluster, "PercentSetting", "0", "NVM")
+    set_attribute(fan_cluster, "PercentSetting", "0")
     set_attribute(fan_cluster, "PercentCurrent", "0")
     set_attribute(fan_cluster, "SpeedMax", "4")
-    set_attribute(fan_cluster, "SpeedSetting", "0", "NVM")
+    set_attribute(fan_cluster, "SpeedSetting", "0")
     set_attribute(fan_cluster, "SpeedCurrent", "0")
     set_attribute(fan_cluster, "FeatureMap", "1")
     set_attribute(fan_cluster, "ClusterRevision", "5")
+    for attribute in fan_cluster["attributes"]:
+        attribute["storageOption"] = "RAM"
 
     light_type["id"] = 3
     light_type["name"] = "HOOD-light"
@@ -106,7 +108,9 @@ def main() -> None:
         if cluster["name"] in {"Identify", "Groups", "Descriptor", "On/Off"}
     ]
     light_cluster = next(cluster for cluster in light_type["clusters"] if cluster["name"] == "On/Off")
-    set_attribute(light_cluster, "OnOff", "0", "NVM")
+    set_attribute(light_cluster, "OnOff", "0")
+    for attribute in light_cluster["attributes"]:
+        attribute["storageOption"] = "RAM"
 
     lighting["endpointTypes"] = [root_type, fan_type, light_type]
     lighting["endpoints"] = [

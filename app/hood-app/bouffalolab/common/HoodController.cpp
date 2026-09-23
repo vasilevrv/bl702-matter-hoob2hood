@@ -19,7 +19,7 @@ constexpr EndpointId kFanEndpoint   = 1;
 constexpr EndpointId kLightEndpoint = 2;
 constexpr uint8_t kFanSpeedMax      = 4;
 
-uint8_t sLastFanCommand = 0xff;
+uint8_t sLastFanCommand  = 0xff;
 int8_t sLastLightCommand = -1;
 
 FanControl::FanModeEnum SpeedToMode(uint8_t speed)
@@ -37,9 +37,9 @@ FanControl::FanModeEnum SpeedToMode(uint8_t speed)
     }
 }
 
-void SendFan(uint8_t speed)
+void SendFan(uint8_t speed, bool force = false)
 {
-    if (speed == sLastFanCommand)
+    if (!force && speed == sLastFanCommand)
     {
         return;
     }
@@ -51,7 +51,44 @@ void SendFan(uint8_t speed)
     }
     else
     {
+        sLastFanCommand = 0xff;
         ChipLogError(NotSpecified, "Hood UART fan write failed");
+    }
+}
+
+void SendLight(bool on, bool force = false)
+{
+    const int8_t state = on ? 1 : 0;
+    if (!force && state == sLastLightCommand)
+    {
+        return;
+    }
+
+    if (hood_uart_write(on ? 'L' : 'l') == 0)
+    {
+        sLastLightCommand = state;
+        ChipLogProgress(NotSpecified, "Hood UART light command: %s", on ? "on" : "off");
+    }
+    else
+    {
+        sLastLightCommand = -1;
+        ChipLogError(NotSpecified, "Hood UART light write failed");
+    }
+}
+
+void SendAllOff()
+{
+    if (hood_uart_write('X') == 0)
+    {
+        sLastFanCommand   = 0;
+        sLastLightCommand = 0;
+        ChipLogProgress(NotSpecified, "Hood UART command: all off");
+    }
+    else
+    {
+        sLastFanCommand   = 0xff;
+        sLastLightCommand = -1;
+        ChipLogError(NotSpecified, "Hood UART all-off write failed");
     }
 }
 
@@ -75,8 +112,7 @@ void HoodController::ApplyFanSetting()
     Nullable<uint8_t> speedSetting;
     uint8_t speed = 0;
 
-    if (FanControl::Attributes::SpeedSetting::Get(kFanEndpoint, speedSetting) == Status::Success &&
-        !speedSetting.IsNull())
+    if (FanControl::Attributes::SpeedSetting::Get(kFanEndpoint, speedSetting) == Status::Success && !speedSetting.IsNull())
     {
         speed = speedSetting.Value();
     }
@@ -108,8 +144,7 @@ void HoodController::ApplyFanMode()
     {
         return;
     }
-    if (FanControl::Attributes::SpeedSetting::Get(kFanEndpoint, speedSetting) == Status::Success &&
-        !speedSetting.IsNull())
+    if (FanControl::Attributes::SpeedSetting::Get(kFanEndpoint, speedSetting) == Status::Success && !speedSetting.IsNull())
     {
         currentSpeed = speedSetting.Value();
     }
@@ -143,27 +178,24 @@ void HoodController::ApplyFanMode()
 
 void HoodController::ApplyFanSpeed(uint8_t speed, bool updateMode)
 {
-    const Percent percent = static_cast<Percent>(speed * 25U);
-    uint8_t speedCurrent = 0;
+    const Percent percent  = static_cast<Percent>(speed * 25U);
+    uint8_t speedCurrent   = 0;
     Percent percentCurrent = 0;
 
-    if (FanControl::Attributes::SpeedCurrent::Get(kFanEndpoint, &speedCurrent) != Status::Success ||
-        speedCurrent != speed)
+    if (FanControl::Attributes::SpeedCurrent::Get(kFanEndpoint, &speedCurrent) != Status::Success || speedCurrent != speed)
     {
         FanControl::Attributes::SpeedCurrent::Set(kFanEndpoint, speed);
     }
-    if (FanControl::Attributes::PercentCurrent::Get(kFanEndpoint, &percentCurrent) != Status::Success ||
-        percentCurrent != percent)
+    if (FanControl::Attributes::PercentCurrent::Get(kFanEndpoint, &percentCurrent) != Status::Success || percentCurrent != percent)
     {
         FanControl::Attributes::PercentCurrent::Set(kFanEndpoint, percent);
     }
 
     if (updateMode)
     {
-        FanControl::FanModeEnum currentMode = FanControl::FanModeEnum::kOff;
+        FanControl::FanModeEnum currentMode       = FanControl::FanModeEnum::kOff;
         const FanControl::FanModeEnum desiredMode = SpeedToMode(speed);
-        if (FanControl::Attributes::FanMode::Get(kFanEndpoint, &currentMode) != Status::Success ||
-            currentMode != desiredMode)
+        if (FanControl::Attributes::FanMode::Get(kFanEndpoint, &currentMode) != Status::Success || currentMode != desiredMode)
         {
             FanControl::Attributes::FanMode::Set(kFanEndpoint, desiredMode);
         }
@@ -180,51 +212,22 @@ void HoodController::ApplyLightSetting()
         return;
     }
 
-    const int8_t state = on ? 1 : 0;
-    if (state == sLastLightCommand)
-    {
-        return;
-    }
-
-    if (hood_uart_write(on ? 'L' : 'l') == 0)
-    {
-        sLastLightCommand = state;
-        ChipLogProgress(NotSpecified, "Hood UART light command: %s", on ? "on" : "off");
-    }
-    else
-    {
-        ChipLogError(NotSpecified, "Hood UART light write failed");
-    }
+    SendLight(on);
 }
 
-void HoodController::CycleLocalMode()
+void HoodController::SetLocalMode(LocalMode mode)
 {
-    bool lightOn = false;
-    Nullable<uint8_t> speedSetting;
-
-    if (OnOff::Attributes::OnOff::Get(kLightEndpoint, &lightOn) != Status::Success ||
-        FanControl::Attributes::SpeedSetting::Get(kFanEndpoint, speedSetting) != Status::Success)
+    const uint8_t modeValue = static_cast<uint8_t>(mode);
+    if (modeValue >= static_cast<uint8_t>(LocalMode::kCount))
     {
-        ChipLogError(NotSpecified, "D27 mode change: failed to read Matter state");
+        ChipLogError(NotSpecified, "D27 mode change: invalid mode %u", static_cast<unsigned>(modeValue));
         return;
     }
 
-    const uint8_t currentSpeed = speedSetting.IsNull() ? 0U : speedSetting.Value();
-    bool nextLight             = false;
-    uint8_t nextSpeed          = 0;
-
-    if (!lightOn && currentSpeed == 0U)
-    {
-        // all off -> light
-        nextLight = true;
-    }
-    else if (lightOn && currentSpeed < 3U)
-    {
-        // light -> light+1 -> light+2 -> light+3
-        nextLight = true;
-        nextSpeed = static_cast<uint8_t>(currentSpeed + 1U);
-    }
-    // Every other state (including intensive speed 4) advances to all off.
+    const bool nextLight    = mode != LocalMode::kOff;
+    const uint8_t nextSpeed = modeValue >= static_cast<uint8_t>(LocalMode::kLightAndSpeed1)
+        ? static_cast<uint8_t>(modeValue - static_cast<uint8_t>(LocalMode::kLight))
+        : 0U;
 
     const Nullable<uint8_t> requestedSpeed(nextSpeed);
     const Nullable<Percent> requestedPercent(static_cast<Percent>(nextSpeed * 25U));
@@ -239,11 +242,22 @@ void HoodController::CycleLocalMode()
         return;
     }
 
-    // We are already on the CHIP event-loop task, so apply the new state now.
-    // Attribute callbacks may schedule another pass, which is harmless because
-    // the UART layer suppresses duplicate bytes.
+    // The hood can also be changed by another controller, so a local button
+    // action must transmit the complete requested state even when our cached
+    // Matter state already has the same values.
+    if (mode == LocalMode::kOff)
+    {
+        SendAllOff();
+    }
+    else
+    {
+        SendFan(nextSpeed, true);
+        SendLight(true, true);
+    }
+
+    // Keep the reported Matter state coherent. Attribute callbacks may
+    // schedule another pass; the UART cache suppresses those duplicate bytes.
     ApplyFanSetting();
     ApplyLightSetting();
-    ChipLogProgress(NotSpecified, "D27 mode: light=%s fan=%u", nextLight ? "on" : "off",
-                    static_cast<unsigned>(nextSpeed));
+    ChipLogProgress(NotSpecified, "D27 mode: light=%s fan=%u", nextLight ? "on" : "off", static_cast<unsigned>(nextSpeed));
 }
